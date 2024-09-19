@@ -1,0 +1,23 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug dylib with REAPER",
+      "type": "cppdbg",
+      "request": "launch",
+      "program": "/Applications/REAPER.app/Contents/MacOS/REAPER",
+      "args": [],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "MIMode": "lldb",
+      "setupCommands": [
+        {
+          "description": "Load dylib",
+          "text": "plugin load ${workspaceFolder}/src/build/reaper_flucoma.dylib",
+          "ignoreFailures": false
+        }
+      ]
+    }
+  ]
+}
