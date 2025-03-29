@@ -15,12 +15,15 @@
 #include <data/FluidTensor.hpp>
 #include <memory>
 #include <vector>
+#include <cmath> // For std::abs, std::min, std::max
+
+#include "VectorBufferAdaptor.h"
 
 #include "reaper_plugin_functions.h"
 
 using namespace fluid::client;
 using namespace noveltyslice;
-using Client = ClientWrapper<NoveltySliceClient>;
+using Client = NRTThreadingNoveltySliceClient;
 using ParamSetType = typename Client::ParamSetType;
 
 class NoveltySlicePlugin {
@@ -35,7 +38,10 @@ class NoveltySlicePlugin {
     NoveltySlicePlugin();
     void frame();
     bool applyNoveltySlice();
-    ParamSetType &initParams();
+    
+    // New functions for audio handling
+    bool readAudioSamples(std::vector<float>& audioData);
+    void visualizeAudio(const std::vector<float>& audioData, int numChannels);
 
     ImGui_Context *m_ctx;
     float m_threshold;
@@ -56,14 +62,17 @@ static void reportError(const ImGui_Error &e) {
 
 NoveltySlicePlugin::NoveltySlicePlugin()
     : m_ctx{},
+      m_threshold(0.5f),
+      m_kernelSize(20),
       m_status{"Ready to slice"},
-      m_params{noveltyslice::NoveltySliceClient::getParameterDescriptors(),
-               fluid::FluidDefaultAllocator()},
+      m_params{Client::getParameterDescriptors(), fluid::FluidDefaultAllocator()},
       m_client{m_params, m_context} {
     ImGui::init(plugin_getapi);
     m_ctx = ImGui::CreateContext(g_name);
     if (!m_ctx) {
+        // Handle error
     } else {
+        // Success
     }
     plugin_register("timer", (void *)NoveltySlicePlugin::loop);
 }
@@ -90,18 +99,16 @@ void NoveltySlicePlugin::loop() {
 }
 
 void NoveltySlicePlugin::frame() {
-    ImGui::SetNextWindowSize(m_ctx, 400, 150, ImGui::Cond_FirstUseEver);
+    ImGui::SetNextWindowSize(m_ctx, 400, 200, ImGui::Cond_FirstUseEver);
 
     bool open{true};
     if (ImGui::Begin(m_ctx, g_name, &open)) {
-        // ImGui::SliderInt(m_ctx, "Threshold", &m_threshold, 0, 100);
-        // ImGui::SliderInt(m_ctx, "Kernel Size", &m_kernelSize, 1, 10);
+        // Add sliders for parameters
+        // ImGui::SliderFloat(m_ctx, "Threshold", &m_threshold, 0.0f, 1.0f, "%.2f");
+        // ImGui::SliderInt(m_ctx, "Kernel Size", &m_kernelSize, 1, 100);
 
         if (ImGui::Button(m_ctx, "Apply NoveltySlice")) {
-            if (applyNoveltySlice())
-                strcpy(m_status, "NoveltySlice applied successfully");
-            else
-                strcpy(m_status, "Failed to apply NoveltySlice");
+            applyNoveltySlice();
         }
 
         ImGui::Text(m_ctx, m_status);
@@ -111,182 +118,266 @@ void NoveltySlicePlugin::frame() {
     if (!open) return s_inst.reset();
 }
 
-namespace fluid {
-
-class VectorBufferAdaptor : public BufferAdaptor {
-   public:
-    VectorBufferAdaptor(std::vector<float> &data, index numChannels,
-                        index numFrames, double sampleRate)
-        : mData(data.data(), 0, numFrames, numChannels),
-          mSampleRate(sampleRate),
-          mAcquired(false) {}
-
-    bool acquire() const override { return !mAcquired && (mAcquired = true); }
-    void release() const override { mAcquired = false; }
-
-    bool valid() const override { return numFrames() > 0; }
-    bool exists() const override { return true; }
-
-    const Result resize(index frames, index channels,
-                        double sampleRate) override {
-        return Result{Result::Status::kError, "Resize not supported"};
-    }
-
-    std::string asString() const override { return "VectorBufferAdaptor"; }
-
-    FluidTensorView<float, 2> allFrames() override { return mData; }
-
-    FluidTensorView<const float, 2> allFrames() const override { return mData; }
-
-    FluidTensorView<float, 1> samps(index channel) override {
-        return mData.col(channel);
-    }
-
-    FluidTensorView<float, 1> samps(index offset, index nframes,
-                                    index chanoffset) override {
-        return mData(Slice(offset, nframes), Slice(chanoffset, 1)).col(0);
-    }
-
-    FluidTensorView<const float, 1> samps(index channel) const override {
-        return mData.col(channel);
-    }
-
-    FluidTensorView<const float, 1> samps(index offset, index nframes,
-                                          index chanoffset) const override {
-        return mData(Slice(offset, nframes), Slice(chanoffset, 1)).col(0);
-    }
-
-    index numFrames() const override { return mData.rows(); }
-    index numChans() const override { return mData.cols(); }
-    double sampleRate() const override { return mSampleRate; }
-
-   private:
-    FluidTensorView<float, 2> mData;
-    double mSampleRate;
-    mutable bool mAcquired;
-};
-}  // namespace fluid
-
-bool NoveltySlicePlugin::applyNoveltySlice() {
-    MediaItem *item = GetSelectedMediaItem(0, 0);
+bool NoveltySlicePlugin::readAudioSamples(std::vector<float>& audioData) {
+    // Clear any existing data
+    audioData.clear();
+    
+    ShowConsoleMsg("NoveltySlice: Starting readAudioSamples()...\n");
+    
+    // Get the selected item
+    MediaItem* item = GetSelectedMediaItem(0, 0);
     if (!item) {
+        ShowConsoleMsg("NoveltySlice: Error - No item selected\n");
         strcpy(m_status, "No item selected");
         return false;
     }
+    ShowConsoleMsg("NoveltySlice: Selected item found\n");
 
-    MediaItem_Take *take = GetActiveTake(item);
+    // Get the active take
+    MediaItem_Take* take = GetActiveTake(item);
     if (!take) {
+        ShowConsoleMsg("NoveltySlice: Error - No active take in selected item\n");
         strcpy(m_status, "No active take in selected item");
         return false;
     }
+    ShowConsoleMsg("NoveltySlice: Active take found\n");
 
-    double sampleRate = GetMediaSourceSampleRate(GetMediaItemTake_Source(take));
-    double startTime = GetMediaItemInfo_Value(item, "D_POSITION");
-    double endTime = startTime + GetMediaItemInfo_Value(item, "D_LENGTH");
+    // Get source information
+    PCM_source* source = GetMediaItemTake_Source(take);
+    if (!source) {
+        ShowConsoleMsg("NoveltySlice: Error - Failed to get media source\n");
+        strcpy(m_status, "Failed to get media source");
+        return false;
+    }
+    ShowConsoleMsg("NoveltySlice: Media source obtained\n");
 
-    // Try to get actual channel count
-    PCM_source *source = GetMediaItemTake_Source(take);
-    int numChannels = 1;
-    if (source) {
-        numChannels = GetMediaSourceNumChannels(source);
-        if (numChannels <= 0)
-            numChannels = 1;  // Fallback if we couldn't get channels
+    // Get sample rate and channel count
+    double sampleRate = GetMediaSourceSampleRate(source);
+    if (sampleRate <= 0) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "NoveltySlice: Error - Invalid sample rate: %.2f\n", sampleRate);
+        ShowConsoleMsg(msg);
+        strcpy(m_status, "Invalid sample rate");
+        return false;
     }
 
-    int64_t numSamples =
-        static_cast<int64_t>((endTime - startTime) * sampleRate);
+    int numChannels = GetMediaSourceNumChannels(source);
+    if (numChannels <= 0) {
+        ShowConsoleMsg("NoveltySlice: Warning - Could not determine channel count, defaulting to 1\n");
+        numChannels = 1; // Fallback if we couldn't get channels
+    }
 
-    AudioAccessor *accessor = CreateTakeAudioAccessor(take);
+    // Get item position and length
+    double startTime = GetMediaItemInfo_Value(item, "D_POSITION");
+    double length = GetMediaItemInfo_Value(item, "D_LENGTH");
+    int64_t numSamples = static_cast<int64_t>(length * sampleRate);
+    
+    char infoMsg[256];
+    snprintf(infoMsg, sizeof(infoMsg), 
+             "NoveltySlice: Audio specs - Sample rate: %.2f Hz, Channels: %d, Length: %.3f sec, Total samples: %lld\n", 
+             sampleRate, numChannels, length, numSamples);
+    ShowConsoleMsg(infoMsg);
+    
+    // Check for empty files
+    if (numSamples <= 0) {
+        ShowConsoleMsg("NoveltySlice: Error - File has no samples\n");
+        strcpy(m_status, "File has no samples");
+        return false;
+    }
+
+    // Create audio accessor
+    ShowConsoleMsg("NoveltySlice: Creating audio accessor...\n");
+    AudioAccessor* accessor = CreateTakeAudioAccessor(take);
     if (!accessor) {
+        ShowConsoleMsg("NoveltySlice: Error - Failed to create audio accessor\n");
         strcpy(m_status, "Failed to create audio accessor");
         return false;
     }
+    ShowConsoleMsg("NoveltySlice: Audio accessor created successfully\n");
 
-    std::vector<float> audioData(numChannels * numSamples, 0.0f);
-    std::vector<double> tempBuffer(numChannels * 1024);
+    // Temporary interleaved buffer
+    ShowConsoleMsg("NoveltySlice: Allocating interleaved buffer...\n");
+    std::vector<float> interleavedData(numChannels * numSamples, 0.0f);
+    snprintf(infoMsg, sizeof(infoMsg), "NoveltySlice: Allocated interleaved buffer of size %zu\n", interleavedData.size());
+    ShowConsoleMsg(infoMsg);
 
+    // Read audio data in blocks
+    const int samplesPerBlock = 4096; // Reasonable block size
+    std::vector<double> tempBuffer(numChannels * samplesPerBlock);
+    
     bool hasValidSamples = false;
-    int samplesPerBlock = 1024;
-    char msgBuf[256];
-
-    // Read audio data
-    for (int64_t offset = 0; offset < numSamples; offset += samplesPerBlock) {
-        int samplesToRead =
-            std::min(samplesPerBlock, static_cast<int>(numSamples - offset));
-        double position = startTime + (offset / sampleRate);
-
-        int ret =
-            GetAudioAccessorSamples(accessor, sampleRate, numChannels, position,
-                                    samplesToRead, tempBuffer.data());
-
-        if (ret == 1)  // Audio data was successfully retrieved
-        {
+    char statusMsg[256];
+    int blocksProcessed = 0;
+    int validBlocks = 0;
+    
+    ShowConsoleMsg("NoveltySlice: Starting block-by-block audio reading...\n");
+    
+    for (int64_t sampleOffset = 0; sampleOffset < numSamples; sampleOffset += samplesPerBlock) {
+        // Calculate how many samples to read in this block
+        int samplesToRead = std::min(samplesPerBlock, static_cast<int>(numSamples - sampleOffset));
+        
+        // Calculate the time position for this block
+        double position = startTime + (static_cast<double>(sampleOffset) / sampleRate);
+        
+        // Only log every 10th block to avoid console spam, except first and last block
+        if (blocksProcessed % 10 == 0 || sampleOffset == 0 || sampleOffset + samplesToRead >= numSamples) {
+            snprintf(infoMsg, sizeof(infoMsg), 
+                    "NoveltySlice: Reading block %d - Offset: %lld, Position: %.3f sec, Samples: %d\n", 
+                    blocksProcessed, sampleOffset, position, samplesToRead);
+            ShowConsoleMsg(infoMsg);
+        }
+        
+        // Read the audio samples
+        int ret = GetAudioAccessorSamples(accessor, sampleRate, numChannels, 
+                                         position, samplesToRead, tempBuffer.data());
+        
+        if (ret == 1) {  // Audio data was successfully retrieved
             hasValidSamples = true;
-            // Convert double to float and copy to audioData
-            for (int i = 0; i < samplesToRead * numChannels; ++i) {
-                audioData[offset * numChannels + i] =
-                    static_cast<float>(tempBuffer[i]);
+            validBlocks++;
+            
+            // Log sample values for the first block to verify data
+            if (sampleOffset == 0) {
+                ShowConsoleMsg("NoveltySlice: First block sample values: ");
+                for (int i = 0; i < std::min(10, samplesToRead * numChannels); i++) {
+                    char sampleVal[32];
+                    snprintf(sampleVal, sizeof(sampleVal), "%.4f ", tempBuffer[i]);
+                    ShowConsoleMsg(sampleVal);
+                }
+                ShowConsoleMsg("\n");
             }
+            
+            // Convert double to float and copy to interleaved buffer
+            for (int i = 0; i < samplesToRead * numChannels; ++i) {
+                interleavedData[sampleOffset * numChannels + i] = static_cast<float>(tempBuffer[i]);
+            }
+        } else {
+            // Log error for failed block read
+            snprintf(infoMsg, sizeof(infoMsg), 
+                    "NoveltySlice: Failed to read block %d - ret: %d\n", 
+                    blocksProcessed, ret);
+            ShowConsoleMsg(infoMsg);
+        }
+        
+        blocksProcessed++;
+    }
+
+    // Clean up the accessor
+    ShowConsoleMsg("NoveltySlice: Destroying audio accessor...\n");
+    DestroyAudioAccessor(accessor);
+    ShowConsoleMsg("NoveltySlice: Audio accessor destroyed\n");
+
+    if (!hasValidSamples) {
+        ShowConsoleMsg("NoveltySlice: Error - No valid audio samples found\n");
+        strcpy(m_status, "No valid audio samples found");
+        return false;
+    }
+    
+    snprintf(infoMsg, sizeof(infoMsg), 
+            "NoveltySlice: Successfully read %d of %d blocks\n", 
+            validBlocks, blocksProcessed);
+    ShowConsoleMsg(infoMsg);
+
+    // Now deinterleave the data for FluCoMa
+    ShowConsoleMsg("NoveltySlice: Deinterleaving audio data...\n");
+    // FluCoMa expects: [all samples for channel 0, all samples for channel 1, ...]
+    // Currently we have: [chan0sample0, chan1sample0, chan0sample1, chan1sample1, ...]
+    
+    // Resize the output vector to hold all audio in non-interleaved format
+    audioData.resize(numChannels * numSamples, 0.0f);
+    snprintf(infoMsg, sizeof(infoMsg), "NoveltySlice: Allocated deinterleaved buffer of size %zu\n", audioData.size());
+    ShowConsoleMsg(infoMsg);
+    
+    // Deinterleave the data
+    for (int64_t sampleIdx = 0; sampleIdx < numSamples; sampleIdx++) {
+        for (int chanIdx = 0; chanIdx < numChannels; chanIdx++) {
+            // Source: interleaved format (sample-major)
+            int sourceIdx = sampleIdx * numChannels + chanIdx;
+            
+            // Destination: non-interleaved format (channel-major)
+            int destIdx = chanIdx * numSamples + sampleIdx;
+            
+            audioData[destIdx] = interleavedData[sourceIdx];
         }
     }
 
-    DestroyAudioAccessor(accessor);
-
-    if (!hasValidSamples) {
-        strcpy(m_status, "No valid audio samples found in selection");
-        return false;
+    // Log first few samples of deinterleaved data to verify format
+    ShowConsoleMsg("NoveltySlice: First few deinterleaved samples (channel 0): ");
+    for (int i = 0; i < std::min(10, static_cast<int>(numSamples)); i++) {
+        char sampleVal[32];
+        snprintf(sampleVal, sizeof(sampleVal), "%.4f ", audioData[i]);
+        ShowConsoleMsg(sampleVal);
+    }
+    ShowConsoleMsg("\n");
+    
+    if (numChannels > 1) {
+        ShowConsoleMsg("NoveltySlice: First few deinterleaved samples (channel 1): ");
+        for (int i = 0; i < std::min(10, static_cast<int>(numSamples)); i++) {
+            char sampleVal[32];
+            snprintf(sampleVal, sizeof(sampleVal), "%.4f ", audioData[numSamples + i]);
+            ShowConsoleMsg(sampleVal);
+        }
+        ShowConsoleMsg("\n");
     }
 
-    // Create buffer adaptor for the audio
-    auto inputBuffer = std::make_shared<fluid::VectorBufferAdaptor>(
-        audioData, numChannels, numSamples, sampleRate);
+    // Success message with basic stats
+    snprintf(statusMsg, sizeof(statusMsg), "Read %lld samples, %d channels", numSamples, numChannels);
+    strcpy(m_status, statusMsg);
+    
+    ShowConsoleMsg("NoveltySlice: readAudioSamples() completed successfully\n");
+    return true;
+}
 
-    // // Set up parameters - use the set method, not reset
-    // // Parameter 0 is typically the input buffer
-    // m_params.set<0>(inputBuffer);
+bool NoveltySlicePlugin::applyNoveltySlice() {
+    // Container for the audio data
+    std::vector<float> audioData;
+    
+    // Read the audio samples - this will deinterleave the data
+    if (!readAudioSamples(audioData)) {
+        return false; // readAudioSamples will set the status and error messages
+    } else {
+        strcpy(m_status, "reading went well");
+    }
+    return true;
+    
+    // Get item and take to determine channel count and sample rate
+    MediaItem* item = GetSelectedMediaItem(0, 0);
+    MediaItem_Take* take = GetActiveTake(item);
+    PCM_source* source = GetMediaItemTake_Source(take);
+    int numChannels = GetMediaSourceNumChannels(source);
+    if (numChannels <= 0) numChannels = 1;
+    double sampleRate = GetMediaSourceSampleRate(source);
+    int64_t numSamples = audioData.size() / numChannels;
+    
+    // Now create a buffer adaptor for FluCoMa
+    auto inputBuffer = InputBufferT::type(
+        new fluid::VectorBufferAdaptor(audioData, numChannels, numSamples, sampleRate)
+    );
+    
+    // Initialize output buffer with appropriate capacity
+    std::vector<float> outputData(numSamples / 10); // Estimate: at most 1 slice per 10 samples
+    auto outputBuffer = BufferT::type(
+        new fluid::VectorBufferAdaptor(outputData, 1, outputData.size(), sampleRate)
+    );
 
-    // // Create output container for slice points
-    std::vector<double> slicePoints;
-
-    ShowConsoleMsg("Processing audio with NoveltySlice...\n");
-
-    // // Process with the correct context parameter
+    // Set up parameters for the NoveltySlice client
+    m_params.template set<0>(std::move(inputBuffer), nullptr);   // Input buffer
+    m_params.template set<1>(FloatT::type(m_kernelSize), nullptr); // Feature kernel size
+    m_params.template set<2>(FloatT::type(m_threshold), nullptr);  // Threshold
+    m_params.template set<3>(LongT::type(1), nullptr);           // Min slice length
+    m_params.template set<4>(LongT::type(0), nullptr);           // FFT size (0=auto)
+    m_params.template set<5>(std::move(outputBuffer), nullptr);  // Output buffer
+    m_params.template set<6>(FloatT::type(1.0), nullptr);        // Filter size
+    
+    // Process the audio
     Result result = m_client.process();
-
-    // if (!result.ok()) {
-    //     snprintf(m_status, sizeof(m_status), "Error: %s",
-    //              result.message().c_str());
-    //     return false;
-    // }
-
-    // // Get the slice points from the output parameter
-    // auto outputBuffer = m_params.get<1>();
-    // if (!outputBuffer) {
-    //     strcpy(m_status, "Failed to get output buffer");
-    //     return false;
-    // }
-
-    // // Extract slice points from the output buffer
-    // // The actual way to access data depends on the specific output type
-    // // This is an approximation - adjust based on actual return type
-    // const auto &outputData = outputBuffer->get();
-    // if (outputData.size() == 0) {
-    //     strcpy(m_status, "No slice points found");
-    //     return false;
-    // }
-
-    // // Create markers from slice points
-    // int sliceCount = 0;
-    // for (const auto &slicePoint : outputData) {
-    //     double markerPosition = startTime + slicePoint / sampleRate;
-    //     AddProjectMarker(nullptr, false, markerPosition, 0, "Slice", -1);
-    //     sliceCount++;
-    // }
-
-    // snprintf(m_status, sizeof(m_status), "Created %d slice markers",
-    //          sliceCount);
-    // UpdateTimeline();
-
+    
+    if (!result.ok()) {
+        strcpy(m_status, result.message().c_str());
+        return false;
+    }
+    
+    // Success
+    strcpy(m_status, "NoveltySlice processed successfully");
     return true;
 }
 
@@ -321,11 +412,8 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     GetReaperFunc(rec, "GetMediaSourceNumChannels", GetMediaSourceNumChannels);
     GetReaperFunc(rec, "GetAudioAccessorSamples", GetAudioAccessorSamples);
     GetReaperFunc(rec, "GetMediaItemInfo_Value", GetMediaItemInfo_Value);
-    GetReaperFunc(rec, "GetMediaItemTakeInfo_Value",
-                  GetMediaItemTakeInfo_Value);
-    GetReaperFunc(rec, "GetMediaSourceNumChannels", GetMediaSourceNumChannels);
+    GetReaperFunc(rec, "GetMediaItemTakeInfo_Value", GetMediaItemTakeInfo_Value);
     GetReaperFunc(rec, "CreateTakeAudioAccessor", CreateTakeAudioAccessor);
-    GetReaperFunc(rec, "GetAudioAccessorSamples", GetAudioAccessorSamples);
     GetReaperFunc(rec, "DestroyAudioAccessor", DestroyAudioAccessor);
     GetReaperFunc(rec, "AddProjectMarker", AddProjectMarker);
     GetReaperFunc(rec, "UpdateTimeline", UpdateTimeline);
