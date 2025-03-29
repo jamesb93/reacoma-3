@@ -45,7 +45,7 @@ class NoveltySlicePlugin {
         void visualizeAudio(int numChannels);
     
         ImGui_Context *m_ctx;
-        float m_threshold;
+        double m_threshold;
         int m_kernelSize;
         char m_status[255];
         fluid::client::FluidContext m_context;
@@ -107,9 +107,8 @@ void NoveltySlicePlugin::frame() {
 
     bool open{true};
     if (ImGui::Begin(m_ctx, g_name, &open)) {
-        // Add sliders for parameters
-        // ImGui::SliderFloat(m_ctx, "Threshold", &m_threshold, 0.0f, 1.0f, "%.2f");
-        // ImGui::SliderInt(m_ctx, "Kernel Size", &m_kernelSize, 1, 100);
+        ImGui::SliderDouble(m_ctx, "Threshold", &m_threshold, 0.0f, 1.0f, "%.2f");
+        ImGui::SliderInt(m_ctx, "Kernel Size", &m_kernelSize, 3, 100);
 
         if (ImGui::Button(m_ctx, "Apply NoveltySlice")) {
             applyNoveltySlice();
@@ -248,8 +247,6 @@ bool NoveltySlicePlugin::applyNoveltySlice() {
 
     int estimatedSlices = static_cast<int>(numSamples / 1024);
     auto outBuffer = std::make_shared<MemoryBufferAdaptor>(1, estimatedSlices, sampleRate);
-    
-    // Convert to BufferT::type (required for parameter)
     auto outputBuffer = BufferT::type(outBuffer);
 
     m_params.template set<0>(std::move(inputBuffer), nullptr);  // source buffer
@@ -260,8 +257,8 @@ bool NoveltySlicePlugin::applyNoveltySlice() {
     m_params.template set<5>(std::move(outputBuffer), nullptr); // indices buffer
     
     m_params.template set<6>(LongT::type(0), nullptr);         // algorithm (0 = Spectrum)
-    m_params.template set<7>(LongRuntimeMaxParam(3, 3), nullptr); // kernelSize
-    m_params.template set<8>(FloatT::type(0.5), nullptr); // threshold
+    m_params.template set<7>(LongRuntimeMaxParam(m_kernelSize, m_kernelSize), nullptr); // kernelSize
+    m_params.template set<8>(FloatT::type(m_threshold), nullptr); // threshold
     m_params.template set<9>(LongRuntimeMaxParam(3, 3), nullptr);         // filterSize
     m_params.template set<10>(LongT::type(2), nullptr);        // minSliceLength
     
@@ -271,12 +268,22 @@ bool NoveltySlicePlugin::applyNoveltySlice() {
     m_client.enqueue(m_params);
     Result result = m_client.process();
     
+    auto startTime = std::chrono::steady_clock::now();
+    const auto timeout = std::chrono::seconds(10); // Adjust timeout as needed
+    
     while(result.ok()) {
         ProcessState state = m_client.checkProgress(result);
         
         if (state == ProcessState::kDone || state == ProcessState::kDoneStillProcessing) {
             break;
         }
+        
+        auto currentTime = std::chrono::steady_clock::now();
+        if (currentTime - startTime > timeout) {
+            strcpy(m_status, "Processing timed out");
+            return false;
+        }
+        
     }
     
     if (!result.ok()) {
