@@ -15,8 +15,7 @@ if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
 endif()
 # Update to include the new source file
 set(SOURCES 
-  ./reaper_noveltyslice.cpp
-  ./VectorBufferAdaptor.cpp
+    ./implementation.cpp
 )
 set(LIBS "")
 if(UNIX AND NOT APPLE)
