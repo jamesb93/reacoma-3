@@ -2,12 +2,14 @@
 
 #include "reaper_imgui_functions.h"
 #include <clients/common/FluidContext.hpp>
+#include <clients/common/FluidBaseClient.hpp>
 #include <clients/common/ParameterSet.hpp>
 #include <memory>
 #include <vector>
 #include <chrono>
 
-// Base class for FluCoMa plugins using parameter sets and processing audio
+using namespace fluid::client;
+
 template<typename ClientType>
 class FluComaPluginBase {
 public:
@@ -32,10 +34,25 @@ protected:
     // Create markers from the processing results
     virtual bool createMarkersFromResults() = 0;
     
+    // Processing mode UI elements - call this from the derived class's frame() method
+    void drawProcessingModeUI();
+    
+    // Check if processing has completed
+    bool checkProcessingProgress();
+    
     // Debounce handling
     bool shouldProcessDebounced();
     void resetDebounce();
     void triggerDebounce();
+    
+    // Signal that parameters were changed
+    void notifyParametersChanged();
+    
+    // Signal that a parameter control was released
+    void notifyParameterReleased();
+    
+    // Check if processing should happen based on current state
+    bool shouldProcess();
     
     // UI Context
     ImGui_Context* m_ctx;
@@ -47,7 +64,7 @@ protected:
     const char* m_pluginName;
     
     // FluCoMa context
-    fluid::client::FluidContext m_context;
+    FluidContext m_context;
     
     // Parameter set and client
     typename ClientType::ParamSetType m_params;
@@ -56,10 +73,24 @@ protected:
     // Audio data storage
     std::vector<float> m_audioData;
     
+    // Processing mode flags
+    bool m_previewMode = false;    // Automatic vs. manual processing
+    bool m_immediateMode = false;  // Parameter change vs. parameter release
+    
+    // Processing state
+    bool m_isProcessing = false;
+    double m_processingProgress = 0.0;
+    
+    // Parameter state tracking
+    bool m_paramsChanged = false;
+    bool m_paramReleased = true;   // Track if parameters have been released
+    
     // Debounce variables
     std::chrono::steady_clock::time_point m_lastParamChange;
-    bool m_paramsChanged;
     double m_debounceTimeMs;
+    
+    // Flag to indicate if any controls are currently active
+    bool m_anyControlActive = false;
 };
 
 // Implementation of template methods
@@ -70,8 +101,14 @@ FluComaPluginBase<ClientType>::FluComaPluginBase(const char* pluginName, double 
       m_context{},
       m_params{ClientType::getParameterDescriptors(), fluid::FluidDefaultAllocator()},
       m_client{m_params, m_context},
+      m_isProcessing{false},
+      m_processingProgress{0.0},
+      m_previewMode{false},
+      m_immediateMode{false},
       m_paramsChanged{false},
-      m_debounceTimeMs{debounceTimeMs}
+      m_paramReleased{true},
+      m_debounceTimeMs{debounceTimeMs},
+      m_anyControlActive{false}
 {
     strcpy(m_status, "Ready");
     ImGui::init(plugin_getapi);
@@ -184,6 +221,80 @@ bool FluComaPluginBase<ClientType>::readAudioSamples() {
 }
 
 template<typename ClientType>
+void FluComaPluginBase<ClientType>::drawProcessingModeUI() {
+    // Store previous values to detect changes
+    bool prevPreviewMode = m_previewMode;
+    bool prevImmediateMode = m_immediateMode;
+    
+    // Mode selection checkboxes
+    ImGui::Text(m_ctx, "Processing Mode:");
+    ImGui::Checkbox(m_ctx, "Preview Mode (auto-process)", &m_previewMode);
+    ImGui::Checkbox(m_ctx, "Immediate Mode (process on change)", &m_immediateMode);
+    
+    // Tooltip explanations
+    if (ImGui::IsItemHovered(m_ctx)) {
+        // Store the return value to fix the warning
+        bool tooltipOpen = ImGui::BeginTooltip(m_ctx);
+        if (tooltipOpen) {
+            ImGui::Text(m_ctx, "When ON: Process on every parameter change (with debouncing)");
+            ImGui::Text(m_ctx, "When OFF: Process only when controls are released");
+            ImGui::EndTooltip(m_ctx);
+        }
+    }
+    
+    // Handle mode toggling - only update status message, don't trigger processing
+    if (prevPreviewMode != m_previewMode || prevImmediateMode != m_immediateMode) {
+        if (m_previewMode) {
+            if (m_immediateMode) {
+                strcpy(m_status, "Auto-processing on parameter change");
+            } else {
+                strcpy(m_status, "Auto-processing on parameter release");
+            }
+        } else {
+            strcpy(m_status, "Manual processing with Apply button");
+        }
+        
+        // Reset any pending debounce to prevent immediate processing
+        resetDebounce();
+        
+        // Make sure we don't process just because mode changed
+        m_paramReleased = true;
+    }
+    
+    ImGui::Separator(m_ctx);
+}
+
+template<typename ClientType>
+bool FluComaPluginBase<ClientType>::checkProcessingProgress() {
+    if (!m_isProcessing) return false;
+    
+    Result result;
+    ProcessState processState = m_client.checkProgress(result);
+    
+    m_processingProgress = m_client.progress() * 100.0;
+    snprintf(m_status, sizeof(m_status), "Processing... %.0f%%", m_processingProgress);
+    
+    if (processState == ProcessState::kDone || processState == ProcessState::kDoneStillProcessing) {
+        m_isProcessing = false;
+        
+        if (!result.ok()) {
+            strcpy(m_status, "Processing failed");
+            return false;
+        }
+        
+        if (createMarkersFromResults()) {
+            // Success handled by createMarkersFromResults
+            return true;
+        } else {
+            strcpy(m_status, "Failed to create markers");
+            return false;
+        }
+    }
+    
+    return false;  // Still processing
+}
+
+template<typename ClientType>
 bool FluComaPluginBase<ClientType>::shouldProcessDebounced() {
     // Check if debounce timer has elapsed
     auto currentTime = std::chrono::steady_clock::now();
@@ -208,4 +319,58 @@ template<typename ClientType>
 void FluComaPluginBase<ClientType>::triggerDebounce() {
     m_paramsChanged = true;
     m_lastParamChange = std::chrono::steady_clock::now();
+}
+
+template<typename ClientType>
+void FluComaPluginBase<ClientType>::notifyParametersChanged() {
+    // Called when a parameter value changes
+    if (m_previewMode && m_immediateMode) {
+        // In immediate mode with preview, use debouncing
+        triggerDebounce();
+    } else {
+        // In other modes, just mark that parameters have changed
+        m_paramReleased = false;
+    }
+}
+
+template<typename ClientType>
+void FluComaPluginBase<ClientType>::notifyParameterReleased() {
+    // Called when a parameter control is released
+    m_paramReleased = true;
+}
+
+template<typename ClientType>
+bool FluComaPluginBase<ClientType>::shouldProcess() {
+    // Never process if we're already processing
+    if (m_isProcessing) {
+        return false;
+    }
+    
+    // In immediate mode with preview, check debounce
+    if (m_previewMode && m_immediateMode && m_paramsChanged) {
+        // Show countdown
+        auto currentTime = std::chrono::steady_clock::now();
+        auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            currentTime - m_lastParamChange).count();
+        
+        double remainingTime = m_debounceTimeMs - elapsedMs;
+        if (remainingTime < 0) remainingTime = 0;
+        
+        char debounceMsg[64];
+        snprintf(debounceMsg, sizeof(debounceMsg), 
+            "Will process in %.1f ms...", remainingTime);
+        ImGui::Text(m_ctx, debounceMsg);
+        
+        // Check if debounce time elapsed
+        return shouldProcessDebounced();
+    }
+    
+    // In non-immediate mode with preview, check for parameter release
+    if (m_previewMode && !m_immediateMode && !m_paramReleased && !m_anyControlActive) {
+        // If parameters were just released and not currently being manipulated
+        m_paramReleased = true;
+        return true;
+    }
+    
+    return false;
 }

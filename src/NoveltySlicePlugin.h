@@ -27,13 +27,14 @@ private:
     bool applyAlgorithm() override;
     bool processAudio() override;
     bool createMarkersFromResults() override;
-    bool checkProcessingProgress();
-    bool m_isProcessing = false;
-    double m_processingProgress = 0.0;
     
     // NoveltySlice specific parameters
     double m_threshold;
     int m_kernelSize;
+    
+    // Store previous parameter values to detect changes
+    double m_prevThreshold;
+    int m_prevKernelSize;
     
     // Specialized helper for this algorithm
     void setupNoveltySliceParameters(int numChannels, int64_t numSamples, double sampleRate);
