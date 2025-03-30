@@ -13,7 +13,7 @@ static void reportError(const ImGui_Error &e) {
 }
 
 NoveltySlicePlugin::NoveltySlicePlugin()
-    : FluComaPluginBase<NoveltySliceClientType>(g_name, 30.0),
+    : FluComaPluginBase<NoveltySliceClientType>(g_name),
       m_threshold(0.1f),
       m_kernelSize(3),
       m_prevThreshold(0.1f),
@@ -72,12 +72,15 @@ void NoveltySlicePlugin::frame() {
             m_prevThreshold = m_threshold;
             m_prevKernelSize = m_kernelSize;
             
+            // Track active state before parameters
+            bool wasActive = m_anyControlActive;
+            
             // Parameter sliders
             bool thresholdActive = ImGui::SliderDouble(m_ctx, "Threshold", &m_threshold, 0.0f, 1.0f, "%.2f");
-            bool kernelSizeActive = ImGui::SliderInt(m_ctx, "Kernel Size", &m_kernelSize, 3, 100);
-            
-            // Track if any control is active
             m_anyControlActive = ImGui::IsItemActive(m_ctx);
+            
+            bool kernelSizeActive = ImGui::SliderInt(m_ctx, "Kernel Size", &m_kernelSize, 3, 100);
+            m_anyControlActive = m_anyControlActive || ImGui::IsItemActive(m_ctx);
             
             // Detect parameter changes
             bool paramsChanged = (m_prevThreshold != m_threshold || m_prevKernelSize != m_kernelSize);
@@ -88,7 +91,7 @@ void NoveltySlicePlugin::frame() {
             }
             
             // Detect parameter release
-            if (!m_anyControlActive && !m_paramReleased) {
+            if (wasActive && !m_anyControlActive) {
                 notifyParameterReleased();
             }
             
@@ -179,8 +182,8 @@ bool NoveltySlicePlugin::processAudio() {
     m_client = NoveltySliceClientType(m_params, m_context);
 
     // Choose between synchronous and asynchronous processing
-    if (m_immediateMode || !m_previewMode) {
-        // Use synchronous processing for immediate mode or manual mode
+    if (m_previewMode && m_immediateMode) {
+        // Only use synchronous processing when both preview AND immediate mode are on
         m_client.setSynchronous(true);
         
         // Process and wait for completion
@@ -200,7 +203,6 @@ bool NoveltySlicePlugin::processAudio() {
         
         return true;
     } else {
-        // Use asynchronous processing with progress tracking
         m_client.setSynchronous(false);
         
         // Start the processing asynchronously

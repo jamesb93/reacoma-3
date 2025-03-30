@@ -17,7 +17,7 @@ public:
 
 protected:
     // Constructor
-    FluComaPluginBase(const char* pluginName, double debounceTimeMs = 30.0);
+    FluComaPluginBase(const char* pluginName);
     
     // Main UI frame processing
     virtual void frame() = 0;
@@ -41,6 +41,7 @@ protected:
     bool checkProcessingProgress();
     
     // Debounce handling
+    bool shouldProcess();
     bool shouldProcessDebounced();
     void resetDebounce();
     void triggerDebounce();
@@ -50,9 +51,6 @@ protected:
     
     // Signal that a parameter control was released
     void notifyParameterReleased();
-    
-    // Check if processing should happen based on current state
-    bool shouldProcess();
     
     // UI Context
     ImGui_Context* m_ctx;
@@ -84,10 +82,11 @@ protected:
     // Parameter state tracking
     bool m_paramsChanged = false;
     bool m_paramReleased = true;   // Track if parameters have been released
-    
+    bool m_pendingChanges = false;
+
     // Debounce variables
     std::chrono::steady_clock::time_point m_lastParamChange;
-    double m_debounceTimeMs;
+    double m_debounceTimeMs = 16.0;
     
     // Flag to indicate if any controls are currently active
     bool m_anyControlActive = false;
@@ -95,7 +94,7 @@ protected:
 
 // Implementation of template methods
 template<typename ClientType>
-FluComaPluginBase<ClientType>::FluComaPluginBase(const char* pluginName, double debounceTimeMs)
+FluComaPluginBase<ClientType>::FluComaPluginBase(const char* pluginName)
     : m_ctx{},
       m_pluginName{pluginName},
       m_context{},
@@ -107,7 +106,7 @@ FluComaPluginBase<ClientType>::FluComaPluginBase(const char* pluginName, double 
       m_immediateMode{false},
       m_paramsChanged{false},
       m_paramReleased{true},
-      m_debounceTimeMs{debounceTimeMs},
+      m_debounceTimeMs{16.0},
       m_anyControlActive{false}
 {
     strcpy(m_status, "Ready");
@@ -327,10 +326,11 @@ void FluComaPluginBase<ClientType>::notifyParametersChanged() {
     if (m_previewMode && m_immediateMode) {
         // In immediate mode with preview, use debouncing
         triggerDebounce();
-    } else {
-        // In other modes, just mark that parameters have changed
-        m_paramReleased = false;
     }
+    
+    // Always mark that parameters have changed and need release
+    m_paramReleased = false;
+    m_pendingChanges = true;  // Add this line
 }
 
 template<typename ClientType>
@@ -366,10 +366,12 @@ bool FluComaPluginBase<ClientType>::shouldProcess() {
     }
     
     // In non-immediate mode with preview, check for parameter release
-    if (m_previewMode && !m_immediateMode && !m_paramReleased && !m_anyControlActive) {
-        // If parameters were just released and not currently being manipulated
-        m_paramReleased = true;
-        return true;
+    if (m_previewMode && !m_immediateMode && !m_anyControlActive) {
+        // If parameters were changed and now released
+        if (m_pendingChanges && m_paramReleased) {  // Modified condition
+            m_pendingChanges = false;  // Reset the pending changes flag
+            return true;
+        }
     }
     
     return false;
