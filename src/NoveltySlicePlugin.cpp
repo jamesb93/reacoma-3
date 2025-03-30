@@ -15,7 +15,9 @@ static void reportError(const ImGui_Error &e) {
 NoveltySlicePlugin::NoveltySlicePlugin()
     : FluComaPluginBase<NoveltySliceClientType>(g_name, 30.0),
       m_threshold(0.1f),
-      m_kernelSize(3)
+      m_kernelSize(3),
+      m_isProcessing(false),
+      m_processingProgress(0.0)
 {
     strcpy(m_status, "Ready to slice");
     plugin_register("timer", (void *)NoveltySlicePlugin::loop);
@@ -42,55 +44,98 @@ void NoveltySlicePlugin::loop() {
     }
 }
 
+// Implement the method in NoveltySlicePlugin.cpp:
+bool NoveltySlicePlugin::checkProcessingProgress() {
+    if (!m_isProcessing) return false;
+    
+    Result result;
+    ProcessState state = m_client.checkProgress(result);
+    
+    // Update progress
+    m_processingProgress = m_client.progress() * 100.0;
+    snprintf(m_status, sizeof(m_status), "Processing... %.0f%%", m_processingProgress);
+    
+    if (state == ProcessState::kDone || state == ProcessState::kDoneStillProcessing) {
+        m_isProcessing = false;
+        
+        if (!result.ok()) {
+            strcpy(m_status, "Processing failed");
+            return false;
+        }
+        
+        if (createMarkersFromResults()) {
+            // Success handled by createMarkersFromResults
+            return true;
+        } else {
+            strcpy(m_status, "Failed to create markers");
+            return false;
+        }
+    }
+    
+    return false;  // Still processing
+}
+
 void NoveltySlicePlugin::frame() {
     ImGui::SetNextWindowSize(m_ctx, 400, 200, ImGui::Cond_FirstUseEver);
 
     bool open{true};
     if (ImGui::Begin(m_ctx, g_name, &open)) {
-        // Store previous values to detect changes
-        double prevThreshold = m_threshold;
-        int prevKernelSize = m_kernelSize;
-        
-        // Display the sliders
-        ImGui::SliderDouble(m_ctx, "Threshold", &m_threshold, 0.0f, 1.0f, "%.2f");
-        ImGui::SliderInt(m_ctx, "Kernel Size", &m_kernelSize, 3, 100);
-        
-        bool paramsJustChanged = (prevThreshold != m_threshold || prevKernelSize != m_kernelSize);
-        
-        // Set flag and update time when params change
-        if (paramsJustChanged) {
-            triggerDebounce();
-        }
-        
-        bool shouldProcess = shouldProcessDebounced();
-        
-        // Check debounce status and update UI
-        if (m_paramsChanged) {
-            auto currentTime = std::chrono::steady_clock::now();
-            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                currentTime - m_lastParamChange).count();
+        // Check if processing is complete
+        if (m_isProcessing) {
+            checkProcessingProgress();
             
-            char debounceMsg[64];
-            double remainingTime = m_debounceTimeMs - elapsedMs;
-            if (remainingTime < 0) remainingTime = 0;
+            // Show progress bar
+            ImGui::ProgressBar(m_ctx, m_processingProgress / 100.0);
+            ImGui::Text(m_ctx, m_status);
+        }
+        else {
+            // Regular UI when not processing
+            // Store previous values to detect changes
+            double prevThreshold = m_threshold;
+            int prevKernelSize = m_kernelSize;
             
-            snprintf(debounceMsg, sizeof(debounceMsg), 
-                "Will process in %.1f ms...", remainingTime);
-            ImGui::Text(m_ctx, debounceMsg);
-        }
-        
-        // Process if button is clicked
-        if (ImGui::Button(m_ctx, "Apply NoveltySlice")) {
-            resetDebounce();
-            shouldProcess = true;
-        }
-        
-        if (shouldProcess) {
-            strcpy(m_status, "Processing...");
-            applyAlgorithm();
-        }
+            // Display the sliders
+            ImGui::SliderDouble(m_ctx, "Threshold", &m_threshold, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderInt(m_ctx, "Kernel Size", &m_kernelSize, 3, 100);
+            
+            bool paramsJustChanged = (prevThreshold != m_threshold || prevKernelSize != m_kernelSize);
+            
+            // Set flag and update time when params change
+            if (paramsJustChanged) {
+                triggerDebounce();
+            }
+            
+            bool shouldProcess = shouldProcessDebounced();
+            
+            // Check debounce status and update UI
+            if (m_paramsChanged) {
+                auto currentTime = std::chrono::steady_clock::now();
+                auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    currentTime - m_lastParamChange).count();
+                
+                char debounceMsg[64];
+                double remainingTime = m_debounceTimeMs - elapsedMs;
+                if (remainingTime < 0) remainingTime = 0;
+                
+                snprintf(debounceMsg, sizeof(debounceMsg), 
+                    "Will process in %.1f ms...", remainingTime);
+                ImGui::Text(m_ctx, debounceMsg);
+            }
+            
+            // Process if button is clicked
+            if (ImGui::Button(m_ctx, "Apply NoveltySlice")) {
+                resetDebounce();
+                shouldProcess = true;
+            }
+            
+            if (shouldProcess) {
+                strcpy(m_status, "Starting processing...");
+                applyAlgorithm();
+            }
 
-        ImGui::Text(m_ctx, m_status);
+            ImGui::Text(m_ctx, m_status);
+        }
+        
         ImGui::End(m_ctx);
     }
 
@@ -157,33 +202,21 @@ bool NoveltySlicePlugin::processAudio() {
     // Reinitialize client with updated parameters
     m_client = NoveltySliceClientType(m_params, m_context);
 
-    // Process the audio
+    // Start the processing asynchronously
     m_client.enqueue(m_params);
     Result result = m_client.process();
     
-    auto startTime = std::chrono::steady_clock::now();
-    const auto timeout = std::chrono::seconds(10); // Adjust timeout as needed
-    
-    while(result.ok()) {
-        ProcessState state = m_client.checkProgress(result);
-        
-        if (state == ProcessState::kDone || state == ProcessState::kDoneStillProcessing) {
-            break;
-        }
-        
-        auto currentTime = std::chrono::steady_clock::now();
-        if (currentTime - startTime > timeout) {
-            strcpy(m_status, "Processing timed out");
-            return false;
-        }
-    }
-    
     if (!result.ok()) {
-        strcpy(m_status, "Processing failed");
+        strcpy(m_status, "Failed to start processing");
         return false;
     }
     
-    return createMarkersFromResults();
+    // Set state to indicate processing is in progress
+    m_isProcessing = true;
+    m_processingProgress = 0.0;
+    strcpy(m_status, "Processing... 0%");
+    
+    return true;
 }
 
 bool NoveltySlicePlugin::createMarkersFromResults() {

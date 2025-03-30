@@ -27,6 +27,9 @@ private:
     bool applyAlgorithm() override;
     bool processAudio() override;
     bool createMarkersFromResults() override;
+    bool checkProcessingProgress();
+    bool m_isProcessing = false;
+    double m_processingProgress = 0.0;
     
     // NoveltySlice specific parameters
     double m_threshold;
