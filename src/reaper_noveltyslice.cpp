@@ -17,6 +17,7 @@
 #include <memory>
 #include <vector>
 #include <cmath> // For std::abs, std::min, std::max
+#include <chrono> // For debounce timer
 
 #include "VectorBufferAdaptor.h"
 
@@ -54,6 +55,11 @@ class NoveltySlicePlugin {
         
         // Add this member variable
         std::vector<float> m_audioData;
+        
+        // Debounce variables
+        std::chrono::steady_clock::time_point m_lastParamChange;
+        bool m_paramsChanged;
+        double m_debounceTimeMs;
     };
 
 constexpr const char *g_name{"FluCoMa NoveltySlice"};
@@ -70,7 +76,9 @@ NoveltySlicePlugin::NoveltySlicePlugin()
       m_kernelSize(3),
       m_status{"Ready to slice"},
       m_params{Client::getParameterDescriptors(), fluid::FluidDefaultAllocator()},
-      m_client{m_params, m_context} {
+      m_client{m_params, m_context},
+      m_paramsChanged(false),
+      m_debounceTimeMs(30.0) { // 500ms debounce delay
     ImGui::init(plugin_getapi);
     m_ctx = ImGui::CreateContext(g_name);
     if (!m_ctx) {
@@ -78,6 +86,7 @@ NoveltySlicePlugin::NoveltySlicePlugin()
     } else {
         // Success
     }
+    m_lastParamChange = std::chrono::steady_clock::now();
     plugin_register("timer", (void *)NoveltySlicePlugin::loop);
 }
 
@@ -107,10 +116,56 @@ void NoveltySlicePlugin::frame() {
 
     bool open{true};
     if (ImGui::Begin(m_ctx, g_name, &open)) {
+        // Store previous values to detect changes
+        double prevThreshold = m_threshold;
+        int prevKernelSize = m_kernelSize;
+        
+        // Display the sliders
         ImGui::SliderDouble(m_ctx, "Threshold", &m_threshold, 0.0f, 1.0f, "%.2f");
         ImGui::SliderInt(m_ctx, "Kernel Size", &m_kernelSize, 3, 100);
-
+        
+        bool paramsJustChanged = (prevThreshold != m_threshold || prevKernelSize != m_kernelSize);
+        
+        // Set flag and update time when params change
+        if (paramsJustChanged) {
+            m_paramsChanged = true;
+            m_lastParamChange = std::chrono::steady_clock::now();
+        }
+        
+        // Check if debounce timer has elapsed
+        auto currentTime = std::chrono::steady_clock::now();
+        auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            currentTime - m_lastParamChange).count();
+            
+        bool shouldProcess = false;
+        
+        // Process if params changed and debounce time elapsed
+        if (m_paramsChanged && elapsedMs >= m_debounceTimeMs) {
+            shouldProcess = true;
+            m_paramsChanged = false;
+            
+            // Update status to show processing is happening
+            strcpy(m_status, "Processing...");
+        }
+        
+        // Also process if button is clicked
         if (ImGui::Button(m_ctx, "Apply NoveltySlice")) {
+            shouldProcess = true;
+            m_paramsChanged = false;
+        }
+        
+        // Show debounce countdown if debouncing
+        if (m_paramsChanged) {
+            char debounceMsg[64];
+            double remainingTime = m_debounceTimeMs - elapsedMs;
+            if (remainingTime < 0) remainingTime = 0;
+            
+            snprintf(debounceMsg, sizeof(debounceMsg), 
+                "Will process in %.1f ms...", remainingTime);
+            ImGui::Text(m_ctx, debounceMsg);
+        }
+        
+        if (shouldProcess) {
             applyNoveltySlice();
         }
 
@@ -283,10 +338,12 @@ bool NoveltySlicePlugin::applyNoveltySlice() {
             strcpy(m_status, "Processing timed out");
             return false;
         }
-        
+
+        // TODO: timeout?
     }
     
     if (!result.ok()) {
+        strcpy(m_status, "Processing failed");
         return false;
     }
     
@@ -298,29 +355,34 @@ bool NoveltySlicePlugin::applyNoveltySlice() {
     
     // Get slice points data
     auto slicesView = readAccess.samps(0);
-    int numSlices = 0;
     
-    double itemPos = GetMediaItemInfo_Value(item, "D_POSITION");
     double playRate = GetMediaItemTakeInfo_Value(take, "D_PLAYRATE");
     
     Undo_BeginBlock2(0);
+    
+    // Delete all existing take markers first
+    int markerCount = GetNumTakeMarkers(take);
+    for (int i = markerCount - 1; i >= 0; i--) {
+        DeleteTakeMarker(take, i);
+    }
+    
+    // Add new markers at slice points
+    int numSlices = 0;
     for (fluid::index i = 0; i < slicesView.size(); i++) {
         if (slicesView(i) > 0) {
             double sliceTime = slicesView(i) / sampleRate / playRate;
-            double markerPos = itemPos + sliceTime;
-            AddProjectMarker(0, false, markerPos, 0, "", -1);
+            SetTakeMarker(take, -1, "slice", &sliceTime, nullptr);
             numSlices++;
         }
     }
     
     UpdateTimeline();
-    Undo_EndBlock2(0, "reacoma", -1);
+    Undo_EndBlock2(0, "FluCoMa: Add NoveltySlice Markers", -1);
     
     // Success
     char successMsg[256];
     snprintf(successMsg, sizeof(successMsg), 
              "NoveltySlice: Added %d slice markers", numSlices);
-    // ShowConsoleMsg((std::string(successMsg) + "\n").c_str());
     strcpy(m_status, successMsg);
     
     return true;
@@ -360,10 +422,15 @@ extern "C" REAPER_PLUGIN_DLL_EXPORT int REAPER_PLUGIN_ENTRYPOINT(
     GetReaperFunc(rec, "GetMediaItemTakeInfo_Value", GetMediaItemTakeInfo_Value);
     GetReaperFunc(rec, "CreateTakeAudioAccessor", CreateTakeAudioAccessor);
     GetReaperFunc(rec, "DestroyAudioAccessor", DestroyAudioAccessor);
-    GetReaperFunc(rec, "AddProjectMarker", AddProjectMarker);
     GetReaperFunc(rec, "UpdateTimeline", UpdateTimeline);
     GetReaperFunc(rec, "Undo_BeginBlock2", Undo_BeginBlock2);
     GetReaperFunc(rec, "Undo_EndBlock2", Undo_EndBlock2);
+    
+    // Take marker functions
+    GetReaperFunc(rec, "SetTakeMarker", SetTakeMarker);
+    GetReaperFunc(rec, "GetTakeMarker", GetTakeMarker);
+    GetReaperFunc(rec, "GetNumTakeMarkers", GetNumTakeMarkers);
+    GetReaperFunc(rec, "DeleteTakeMarker", DeleteTakeMarker);
 
     custom_action_register_t action{
         0, "FLUCOMA_NOVELTYSLICE",
