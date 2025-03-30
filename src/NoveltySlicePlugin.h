@@ -1,20 +1,17 @@
 #pragma once
 
-#include "reaper_imgui_functions.h"
-#include <clients/common/FluidContext.hpp>
-#include <clients/common/ParameterSet.hpp>
+#include "FlucomaPluginBase.h"
 #include <clients/rt/NoveltySliceClient.hpp>
-#include <memory>
-#include <vector>
-#include <chrono>
+#include <clients/common/BufferAdaptor.hpp>
+#include <clients/common/MemoryBufferAdaptor.hpp>
+#include <clients/common/ParameterTypes.hpp>
 
 // Using declarations for FluCoMa types
 using namespace fluid::client;
 using namespace noveltyslice;
-using Client = NRTThreadingNoveltySliceClient;
-using ParamSetType = typename Client::ParamSetType;
+using NoveltySliceClientType = NRTThreadingNoveltySliceClient;
 
-class NoveltySlicePlugin {
+class NoveltySlicePlugin : public FluComaPluginBase<NoveltySliceClientType> {
 public:
     static void start();
     ~NoveltySlicePlugin();
@@ -24,25 +21,17 @@ private:
     static std::unique_ptr<NoveltySlicePlugin> s_inst;
 
     NoveltySlicePlugin();
-    void frame();
-    bool applyNoveltySlice();
     
-    bool readAudioSamples();
-    void visualizeAudio(int numChannels);
-
-    ImGui_Context *m_ctx;
+    // Implement base class virtual methods
+    void frame() override;
+    bool applyAlgorithm() override;
+    bool processAudio() override;
+    bool createMarkersFromResults() override;
+    
+    // NoveltySlice specific parameters
     double m_threshold;
     int m_kernelSize;
-    char m_status[255];
-    fluid::client::FluidContext m_context;
-    ParamSetType m_params;
-    Client m_client;
     
-    // Audio data storage
-    std::vector<float> m_audioData;
-    
-    // Debounce variables
-    std::chrono::steady_clock::time_point m_lastParamChange;
-    bool m_paramsChanged;
-    double m_debounceTimeMs;
+    // Specialized helper for this algorithm
+    void setupNoveltySliceParameters(int numChannels, int64_t numSamples, double sampleRate);
 };
