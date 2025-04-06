@@ -4,21 +4,20 @@
 #include <clients/common/BufferAdaptor.hpp>
 #include <clients/common/MemoryBufferAdaptor.hpp>
 #include <clients/common/ParameterTypes.hpp>
+#include "VectorBufferAdaptor.h"
 
+// Using declarations for FluCoMa types
 using namespace fluid::client;
 using namespace noveltyslice;
 using NoveltySliceClientType = NRTThreadingNoveltySliceClient;
 
-class NoveltySlicePlugin : public FluComaPluginBase<NoveltySliceClientType> {
+class NoveltySlicePlugin : public FluComaPluginBase<NoveltySliceClientType, NoveltySlicePlugin> {
 public:
-    static void start();
+    // Constructor is now public since it's called by the base class's start() method
+    NoveltySlicePlugin();
     ~NoveltySlicePlugin();
 
 private:
-    static void loop();
-    static std::unique_ptr<NoveltySlicePlugin> s_inst;
-    NoveltySlicePlugin();
-    
     // Implement parameter UI drawing from base class
     void drawParameterControls() override;
     
@@ -30,7 +29,11 @@ private:
     
     // Implement remaining base class virtual methods
     bool applyAlgorithm() override;
-    bool processAudio() override;
+    
+    // Setup parameters specifically for NoveltySlice algorithm
+    void setupParameters(int numChannels, int64_t numSamples, double sampleRate) override;
+    
+    // Create markers from results
     bool createMarkersFromResults() override;
     
     // NoveltySlice specific parameters
@@ -40,7 +43,4 @@ private:
     // Store previous parameter values to detect changes
     double m_prevThreshold;
     int m_prevKernelSize;
-    
-    // Specialized helper for this algorithm
-    void setupNoveltySliceParameters(int numChannels, int64_t numSamples, double sampleRate);
 };

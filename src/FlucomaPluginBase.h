@@ -1,5 +1,6 @@
 #pragma once
 #include "reaper_imgui_functions.h"
+#include "reaper_plugin_functions.h"
 #include <clients/common/FluidContext.hpp>
 #include <clients/common/FluidBaseClient.hpp>
 #include <clients/common/ParameterSet.hpp>
@@ -8,14 +9,21 @@
 #include <chrono>
 using namespace fluid::client;
 
-template<typename ClientType>
+template<typename ClientType, typename PluginType>
 class FluComaPluginBase {
 public:
+    // Static methods for plugin lifecycle management
+    static void start();
+    static void loop();
+    
     virtual ~FluComaPluginBase();
 
 protected:
     // Constructor
     FluComaPluginBase(const char* pluginName);
+    
+    // Static instance pointer
+    static std::unique_ptr<PluginType> s_inst;
 
     // Main UI frame processing - final implementation in base class
     void frame();
@@ -35,10 +43,13 @@ protected:
     // Apply the algorithm - must be implemented by derived classes
     virtual bool applyAlgorithm() = 0;
     
-    // Process the audio with the current parameters
-    virtual bool processAudio() = 0;
+    // Process the audio with the current parameters - implemented in base class
+    bool processAudio();
     
-    // Create markers from the processing results
+    // Virtual method for setting up algorithm parameters - must be implemented by derived classes
+    virtual void setupParameters(int numChannels, int64_t numSamples, double sampleRate) = 0;
+    
+    // Create markers from the processing results - must be implemented by derived classes
     virtual bool createMarkersFromResults() = 0;
     
     // Processing mode UI elements - call this from the base class's frame() method
@@ -100,8 +111,30 @@ protected:
 };
 
 // Implementation of template methods
-template<typename ClientType>
-FluComaPluginBase<ClientType>::FluComaPluginBase(const char* pluginName)
+template<typename ClientType, typename PluginType>
+std::unique_ptr<PluginType> FluComaPluginBase<ClientType, PluginType>::s_inst;
+
+template<typename ClientType, typename PluginType>
+void FluComaPluginBase<ClientType, PluginType>::start() try {
+    if (s_inst)
+        ImGui::SetNextWindowFocus(s_inst->m_ctx);
+    else {
+        s_inst.reset(new PluginType());
+    }
+} catch (const ImGui_Error &e) {
+    ShowMessageBox(e.what(), s_inst ? s_inst->m_pluginName : "FluCoMa Plugin", 0);
+    s_inst.reset();
+}
+
+template<typename ClientType, typename PluginType>
+void FluComaPluginBase<ClientType, PluginType>::loop() {
+    if (s_inst) {
+        s_inst->frame();
+    }
+}
+
+template<typename ClientType, typename PluginType>
+FluComaPluginBase<ClientType, PluginType>::FluComaPluginBase(const char* pluginName)
     : m_ctx{},
       m_pluginName{pluginName},
       m_context{},
@@ -120,17 +153,22 @@ FluComaPluginBase<ClientType>::FluComaPluginBase(const char* pluginName)
     ImGui::init(plugin_getapi);
     m_ctx = ImGui::CreateContext(m_pluginName);
     m_lastParamChange = std::chrono::steady_clock::now();
+    
+    // Register timer callback for frame updates
+    plugin_register("timer", (void *)&loop);
 }
 
-template<typename ClientType>
-FluComaPluginBase<ClientType>::~FluComaPluginBase() {
+template<typename ClientType, typename PluginType>
+FluComaPluginBase<ClientType, PluginType>::~FluComaPluginBase() {
+    // Unregister timer callback
+    plugin_register("-timer", reinterpret_cast<void *>(&loop));
     if (m_ctx) {
         // ImGui::DestroyContext(m_ctx);
     }
 }
 
-template<typename ClientType>
-void FluComaPluginBase<ClientType>::frame() {
+template<typename ClientType, typename PluginType>
+void FluComaPluginBase<ClientType, PluginType>::frame() {
     ImGui::SetNextWindowSize(m_ctx, 400, 210, ImGui::Cond_FirstUseEver);
 
     bool open{true};
@@ -194,11 +232,11 @@ void FluComaPluginBase<ClientType>::frame() {
         ImGui::End(m_ctx);
     }
 
-    if (!open) return;
+    if (!open) return s_inst.reset();
 }
 
-template<typename ClientType>
-bool FluComaPluginBase<ClientType>::readAudioSamples() {
+template<typename ClientType, typename PluginType>
+bool FluComaPluginBase<ClientType, PluginType>::readAudioSamples() {
     m_audioData.clear();
     MediaItem* item = GetSelectedMediaItem(0, 0);
     if (!item) {
@@ -288,8 +326,71 @@ bool FluComaPluginBase<ClientType>::readAudioSamples() {
     return true;
 }
 
-template<typename ClientType>
-void FluComaPluginBase<ClientType>::drawProcessingModeUI() {
+template<typename ClientType, typename PluginType>
+bool FluComaPluginBase<ClientType, PluginType>::processAudio() {
+    MediaItem* item = GetSelectedMediaItem(0, 0);
+    if (!item) return false;
+    
+    MediaItem_Take* take = GetActiveTake(item);
+    if (!take) return false;
+    
+    PCM_source* source = GetMediaItemTake_Source(take);
+    if (!source->IsAvailable()) {
+        return false;
+    } 
+    
+    int numChannels = source->GetNumChannels();
+    double sampleRate = source->GetSampleRate();
+    int64_t numSamples = m_audioData.size() / numChannels;
+    
+    if (numChannels <= 0) {
+        return false;
+    }
+
+    // Call the virtual method to set up algorithm-specific parameters
+    setupParameters(numChannels, numSamples, sampleRate);
+    
+    // Create a new client instance with the updated parameters
+    m_client = ClientType(m_params, m_context);
+
+    if (m_previewMode && m_immediateMode) {
+        m_client.setSynchronous(true);
+        
+        m_client.enqueue(m_params);
+        Result result = m_client.process();
+        
+        if (!result.ok()) {
+            strcpy(m_status, "Processing failed");
+            return false;
+        }
+        
+        if (!createMarkersFromResults()) {
+            strcpy(m_status, "Failed to create markers");
+            return false;
+        }
+        
+        return true;
+    } else {
+        m_client.setSynchronous(false);
+        
+        m_client.enqueue(m_params);
+        Result result = m_client.process();
+        
+        if (!result.ok()) {
+            strcpy(m_status, "Failed to start processing");
+            return false;
+        }
+        
+        m_isProcessing = true;
+        m_processingProgress = 0.0;
+        strcpy(m_status, "Processing... 0%");
+        
+        return true;
+    }
+}
+
+template<typename ClientType, typename PluginType>
+void FluComaPluginBase<ClientType, PluginType>::drawProcessingModeUI() {
     // Store previous values to detect changes
     bool prevPreviewMode = m_previewMode;
     bool prevImmediateMode = m_immediateMode;
@@ -330,8 +431,8 @@ void FluComaPluginBase<ClientType>::drawProcessingModeUI() {
     ImGui::Separator(m_ctx);
 }
 
-template<typename ClientType>
-bool FluComaPluginBase<ClientType>::checkProcessingProgress() {
+template<typename ClientType, typename PluginType>
+bool FluComaPluginBase<ClientType, PluginType>::checkProcessingProgress() {
     if (!m_isProcessing) return false;
     
     Result result;
@@ -358,8 +459,8 @@ bool FluComaPluginBase<ClientType>::checkProcessingProgress() {
     return false; // Still processing
 }
 
-template<typename ClientType>
-bool FluComaPluginBase<ClientType>::shouldProcessDebounced() {
+template<typename ClientType, typename PluginType>
+bool FluComaPluginBase<ClientType, PluginType>::shouldProcessDebounced() {
     // Check if debounce timer has elapsed
     auto currentTime = std::chrono::steady_clock::now();
     auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -374,19 +475,19 @@ bool FluComaPluginBase<ClientType>::shouldProcessDebounced() {
     return false;
 }
 
-template<typename ClientType>
-void FluComaPluginBase<ClientType>::resetDebounce() {
+template<typename ClientType, typename PluginType>
+void FluComaPluginBase<ClientType, PluginType>::resetDebounce() {
     m_paramsChanged = false;
 }
 
-template<typename ClientType>
-void FluComaPluginBase<ClientType>::triggerDebounce() {
+template<typename ClientType, typename PluginType>
+void FluComaPluginBase<ClientType, PluginType>::triggerDebounce() {
     m_paramsChanged = true;
     m_lastParamChange = std::chrono::steady_clock::now();
 }
 
-template<typename ClientType>
-void FluComaPluginBase<ClientType>::notifyParametersChanged() {
+template<typename ClientType, typename PluginType>
+void FluComaPluginBase<ClientType, PluginType>::notifyParametersChanged() {
     // Called when a parameter value changes
     if (m_previewMode && m_immediateMode) {
         // In immediate mode with preview, use debouncing
@@ -398,14 +499,14 @@ void FluComaPluginBase<ClientType>::notifyParametersChanged() {
     m_pendingChanges = true;
 }
 
-template<typename ClientType>
-void FluComaPluginBase<ClientType>::notifyParameterReleased() {
+template<typename ClientType, typename PluginType>
+void FluComaPluginBase<ClientType, PluginType>::notifyParameterReleased() {
     // Called when a parameter control is released
     m_paramReleased = true;
 }
 
-template<typename ClientType>
-bool FluComaPluginBase<ClientType>::shouldProcess() {
+template<typename ClientType, typename PluginType>
+bool FluComaPluginBase<ClientType, PluginType>::shouldProcess() {
     // Never process if we're already processing
     if (m_isProcessing) {
         return false;

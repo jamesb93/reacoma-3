@@ -1,47 +1,22 @@
 #include "NoveltySlicePlugin.h"
-#include "VectorBufferAdaptor.h"
 #include "reaper_plugin_functions.h"
-
 #include <algorithm>
 #include <cmath>
 
 constexpr const char *g_name{"FluCoMa NoveltySlice"};
-std::unique_ptr<NoveltySlicePlugin> NoveltySlicePlugin::s_inst;
-
-static void reportError(const ImGui_Error &e) {
-    ShowMessageBox(e.what(), g_name, 0);
-}
 
 NoveltySlicePlugin::NoveltySlicePlugin()
-    : FluComaPluginBase<NoveltySliceClientType>(g_name),
+    : FluComaPluginBase<NoveltySliceClientType, NoveltySlicePlugin>(g_name),
       m_threshold(0.1f),
       m_kernelSize(3),
       m_prevThreshold(0.1f),
       m_prevKernelSize(3)
 {
     strcpy(m_status, "Ready to slice");
-    plugin_register("timer", (void *)NoveltySlicePlugin::loop);
 }
 
 NoveltySlicePlugin::~NoveltySlicePlugin() {
-    plugin_register("-timer", reinterpret_cast<void *>(&loop));
-}
-
-void NoveltySlicePlugin::start() try {
-    if (s_inst)
-        ImGui::SetNextWindowFocus(s_inst->m_ctx);
-    else {
-        s_inst.reset(new NoveltySlicePlugin);
-    }
-} catch (const ImGui_Error &e) {
-    reportError(e);
-    s_inst.reset();
-}
-
-void NoveltySlicePlugin::loop() {
-    if (s_inst) {
-        s_inst->frame();
-    }
+    // Base class destructor handles unregistering the timer
 }
 
 // Parameter UI method - only implement the parameter controls
@@ -73,10 +48,10 @@ bool NoveltySlicePlugin::applyAlgorithm() {
         return false;
     }
     
-    return processAudio();
+    return processAudio(); // This now calls the base class implementation
 }
 
-void NoveltySlicePlugin::setupNoveltySliceParameters(int numChannels, int64_t numSamples, double sampleRate) {
+void NoveltySlicePlugin::setupParameters(int numChannels, int64_t numSamples, double sampleRate) {
     // Setup input buffer
     auto inputBuffer = InputBufferT::type(
         new fluid::VectorBufferAdaptor(m_audioData, numChannels, numSamples, sampleRate)
@@ -98,74 +73,10 @@ void NoveltySlicePlugin::setupNoveltySliceParameters(int numChannels, int64_t nu
     m_params.template set<6>(LongT::type(0), nullptr);         // algorithm (0 = Spectrum)
     m_params.template set<7>(LongRuntimeMaxParam(m_kernelSize, m_kernelSize), nullptr); // kernelSize
     m_params.template set<8>(FloatT::type(m_threshold), nullptr); // threshold
-    m_params.template set<9>(LongRuntimeMaxParam(3, 3), nullptr);         // filterSize
+    m_params.template set<9>(LongRuntimeMaxParam(3, 3), nullptr); // filterSize
     m_params.template set<10>(LongT::type(2), nullptr);        // minSliceLength
     
-    m_params.template set<11>(fluid::client::FFTParams(1024, -1, -1), nullptr);// hopSize
-}
-
-bool NoveltySlicePlugin::processAudio() {
-    MediaItem* item = GetSelectedMediaItem(0, 0);
-    if (!item) return false;
-    
-    MediaItem_Take* take = GetActiveTake(item);
-    if (!take) return false;
-    
-    PCM_source* source = GetMediaItemTake_Source(take);
-    if (!source->IsAvailable()) {
-        return false;
-    } 
-    
-    int numChannels = source->GetNumChannels();
-    double sampleRate = source->GetSampleRate();
-    int64_t numSamples = m_audioData.size() / numChannels;
-    
-    if (numChannels <= 0) {
-        return false;
-    }
-
-    setupNoveltySliceParameters(
-        numChannels, 
-        numSamples, 
-        sampleRate
-    );
-    
-    m_client = NoveltySliceClientType(m_params, m_context);
-
-    if (m_previewMode && m_immediateMode) {
-        m_client.setSynchronous(true);
-        
-        m_client.enqueue(m_params);
-        Result result = m_client.process();
-        
-        if (!result.ok()) {
-            strcpy(m_status, "Processing failed");
-            return false;
-        }
-        
-        if (!createMarkersFromResults()) {
-            strcpy(m_status, "Failed to create markers");
-            return false;
-        }
-        
-        return true;
-    } else {
-        m_client.setSynchronous(false);
-        
-        m_client.enqueue(m_params);
-        Result result = m_client.process();
-        
-        if (!result.ok()) {
-            strcpy(m_status, "Failed to start processing");
-            return false;
-        }
-        
-        m_isProcessing = true;
-        m_processingProgress = 0.0;
-        strcpy(m_status, "Processing... 0%");
-        
-        return true;
-    }
+    m_params.template set<11>(fluid::client::FFTParams(1024, -1, -1), nullptr); // hopSize
 }
 
 bool NoveltySlicePlugin::createMarkersFromResults() {
@@ -175,7 +86,6 @@ bool NoveltySlicePlugin::createMarkersFromResults() {
     MediaItem_Take* take = GetActiveTake(item);
     if (!take) return false;
     
-
     PCM_source* source = GetMediaItemTake_Source(take);
     if (!source) return false;
     
