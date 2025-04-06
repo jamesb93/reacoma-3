@@ -1,5 +1,4 @@
 #pragma once
-
 #include "reaper_imgui_functions.h"
 #include <clients/common/FluidContext.hpp>
 #include <clients/common/FluidBaseClient.hpp>
@@ -7,7 +6,6 @@
 #include <memory>
 #include <vector>
 #include <chrono>
-
 using namespace fluid::client;
 
 template<typename ClientType>
@@ -18,9 +16,18 @@ public:
 protected:
     // Constructor
     FluComaPluginBase(const char* pluginName);
+
+    // Main UI frame processing - final implementation in base class
+    void frame();
     
-    // Main UI frame processing
-    virtual void frame() = 0;
+    // Virtual method for derived classes to implement parameter UI
+    virtual void drawParameterControls() = 0;
+    
+    // Virtual method to check if parameters have changed from previous values
+    virtual bool haveParametersChanged() = 0;
+    
+    // Virtual method to save current parameters as previous values
+    virtual void saveParameterValues() = 0;
     
     // Common audio data reading functionality
     bool readAudioSamples();
@@ -34,7 +41,7 @@ protected:
     // Create markers from the processing results
     virtual bool createMarkersFromResults() = 0;
     
-    // Processing mode UI elements - call this from the derived class's frame() method
+    // Processing mode UI elements - call this from the base class's frame() method
     void drawProcessingModeUI();
     
     // Check if processing has completed
@@ -72,8 +79,8 @@ protected:
     std::vector<float> m_audioData;
     
     // Processing mode flags
-    bool m_previewMode = false;    // Automatic vs. manual processing
-    bool m_immediateMode = false;  // Parameter change vs. parameter release
+    bool m_previewMode = false; // Automatic vs. manual processing
+    bool m_immediateMode = false; // Parameter change vs. parameter release
     
     // Processing state
     bool m_isProcessing = false;
@@ -81,9 +88,9 @@ protected:
     
     // Parameter state tracking
     bool m_paramsChanged = false;
-    bool m_paramReleased = true;   // Track if parameters have been released
+    bool m_paramReleased = true; // Track if parameters have been released
     bool m_pendingChanges = false;
-
+    
     // Debounce variables
     std::chrono::steady_clock::time_point m_lastParamChange;
     double m_debounceTimeMs = 16.0;
@@ -123,80 +130,142 @@ FluComaPluginBase<ClientType>::~FluComaPluginBase() {
 }
 
 template<typename ClientType>
+void FluComaPluginBase<ClientType>::frame() {
+    ImGui::SetNextWindowSize(m_ctx, 400, 210, ImGui::Cond_FirstUseEver);
+
+    bool open{true};
+    if (ImGui::Begin(m_ctx, m_pluginName, &open)) {
+        // Check if async processing is complete
+        if (m_isProcessing) {
+            checkProcessingProgress();
+            
+            // Show progress bar
+            ImGui::ProgressBar(m_ctx, m_processingProgress / 100.0);
+            ImGui::Text(m_ctx, m_status);
+            
+            // Add a cancel button
+            if (ImGui::Button(m_ctx, "Cancel Processing")) {
+                // Reset the processing state
+                m_isProcessing = false;
+                strcpy(m_status, "Processing cancelled");
+            }
+        }
+        else {
+            // Draw the processing mode UI elements
+            drawProcessingModeUI();
+            
+            bool wasActive = m_anyControlActive;
+            m_anyControlActive = false;
+            
+            // Draw parameter controls from derived class
+            drawParameterControls();
+            
+            // Check for parameter changes
+            if (haveParametersChanged()) {
+                notifyParametersChanged();
+                saveParameterValues();
+            }
+            
+            // Notify base class when controls are released
+            if (wasActive && !m_anyControlActive) {
+                notifyParameterReleased();
+            }
+            
+            // Check if we should process based on the current state
+            bool shouldProcessNow = shouldProcess();
+            
+            // Show Apply button in manual mode
+            if (!m_previewMode) {
+                if (ImGui::Button(m_ctx, "Apply")) {
+                    shouldProcessNow = true;
+                }
+            }
+            
+            // Process if needed
+            if (shouldProcessNow) {
+                resetDebounce();
+                strcpy(m_status, "Processing...");
+                applyAlgorithm();
+            }
+
+            ImGui::Text(m_ctx, m_status);
+        }
+        
+        ImGui::End(m_ctx);
+    }
+
+    if (!open) return;
+}
+
+template<typename ClientType>
 bool FluComaPluginBase<ClientType>::readAudioSamples() {
     m_audioData.clear();
-    
     MediaItem* item = GetSelectedMediaItem(0, 0);
     if (!item) {
         strcpy(m_status, "No item selected");
         return false;
     }
-
+    
     MediaItem_Take* take = GetActiveTake(item);
     if (!take) {
         strcpy(m_status, "No active take in selected item");
         return false;
     }
-
+    
     PCM_source* source = GetMediaItemTake_Source(take);
     if (!source) {
         strcpy(m_status, "Failed to get media source");
         return false;
     }
-
+    
     double sampleRate = GetMediaSourceSampleRate(source);
     if (sampleRate <= 0) {
         strcpy(m_status, "Invalid sample rate");
         return false;
     }
-
+    
     int numChannels = GetMediaSourceNumChannels(source);
     if (numChannels <= 0) {
         numChannels = 1;
     }
-
+    
     double length = GetMediaItemInfo_Value(item, "D_LENGTH");
     double exactNumSamples = length * sampleRate;
     int64_t numSamples = static_cast<int64_t>(exactNumSamples + 0.5);
-    
     if (numSamples <= 0) {
         strcpy(m_status, "File has no samples");
         return false;
     }
-
+    
     AudioAccessor* accessor = CreateTakeAudioAccessor(take);
     if (!accessor) {
         strcpy(m_status, "Failed to create audio accessor");
         return false;
     }
-
+    
     m_audioData.resize(numChannels * numSamples, 0.0f);
-
     const int blockSize = 8192; // Reasonable block size
     std::vector<double> buffer(blockSize * numChannels); // Temporary buffer for reading
+    bool hasValidSamples = false;
     
-    bool hasValidSamples = false;    
     for (int64_t sampleOffset=0; sampleOffset < numSamples; sampleOffset += blockSize) {
         int64_t remainingSamples = numSamples - sampleOffset;
-
         int samplesToRead = static_cast<int>(std::min<int64_t>(remainingSamples, blockSize));
-
         if (samplesToRead <= 0) {
             break;
         }
         
         double position = (static_cast<double>(sampleOffset) / sampleRate);
-
         int ret = GetAudioAccessorSamples(
-            accessor, 
-            sampleRate, 
-            numChannels, 
-            position, 
+            accessor,
+            sampleRate,
+            numChannels,
+            position,
             samplesToRead,
             buffer.data()
         );
         
-        if (ret == 1) {  // Audio data was successfully retrieved
+        if (ret == 1) { // Audio data was successfully retrieved
             hasValidSamples = true;
             for (int sampleIdx = 0; sampleIdx < samplesToRead; sampleIdx++) {
                 for (int chanIdx = 0; chanIdx < numChannels; chanIdx++) {
@@ -209,13 +278,13 @@ bool FluComaPluginBase<ClientType>::readAudioSamples() {
             }
         }
     }
-
     DestroyAudioAccessor(accessor);
-
+    
     if (!hasValidSamples) {
         strcpy(m_status, "No valid audio samples found");
         return false;
     }
+    
     return true;
 }
 
@@ -252,10 +321,8 @@ void FluComaPluginBase<ClientType>::drawProcessingModeUI() {
         } else {
             strcpy(m_status, "Manual processing with Apply button");
         }
-        
         // Reset any pending debounce to prevent immediate processing
         resetDebounce();
-        
         // Make sure we don't process just because mode changed
         m_paramReleased = true;
     }
@@ -269,13 +336,11 @@ bool FluComaPluginBase<ClientType>::checkProcessingProgress() {
     
     Result result;
     ProcessState processState = m_client.checkProgress(result);
-    
     m_processingProgress = m_client.progress() * 100.0;
     snprintf(m_status, sizeof(m_status), "Processing... %.0f%%", m_processingProgress);
     
     if (processState == ProcessState::kDone || processState == ProcessState::kDoneStillProcessing) {
         m_isProcessing = false;
-        
         if (!result.ok()) {
             strcpy(m_status, "Processing failed");
             return false;
@@ -290,7 +355,7 @@ bool FluComaPluginBase<ClientType>::checkProcessingProgress() {
         }
     }
     
-    return false;  // Still processing
+    return false; // Still processing
 }
 
 template<typename ClientType>
@@ -299,7 +364,7 @@ bool FluComaPluginBase<ClientType>::shouldProcessDebounced() {
     auto currentTime = std::chrono::steady_clock::now();
     auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         currentTime - m_lastParamChange).count();
-        
+    
     // Process if params changed and debounce time elapsed
     if (m_paramsChanged && elapsedMs >= m_debounceTimeMs) {
         m_paramsChanged = false;
@@ -330,7 +395,7 @@ void FluComaPluginBase<ClientType>::notifyParametersChanged() {
     
     // Always mark that parameters have changed and need release
     m_paramReleased = false;
-    m_pendingChanges = true;  // Add this line
+    m_pendingChanges = true;
 }
 
 template<typename ClientType>
@@ -352,13 +417,11 @@ bool FluComaPluginBase<ClientType>::shouldProcess() {
         auto currentTime = std::chrono::steady_clock::now();
         auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             currentTime - m_lastParamChange).count();
-        
         double remainingTime = m_debounceTimeMs - elapsedMs;
         if (remainingTime < 0) remainingTime = 0;
-        
         char debounceMsg[64];
-        snprintf(debounceMsg, sizeof(debounceMsg), 
-            "Will process in %.1f ms...", remainingTime);
+        snprintf(debounceMsg, sizeof(debounceMsg),
+                "Will process in %.1f ms...", remainingTime);
         ImGui::Text(m_ctx, debounceMsg);
         
         // Check if debounce time elapsed
@@ -368,8 +431,8 @@ bool FluComaPluginBase<ClientType>::shouldProcess() {
     // In non-immediate mode with preview, check for parameter release
     if (m_previewMode && !m_immediateMode && !m_anyControlActive) {
         // If parameters were changed and now released
-        if (m_pendingChanges && m_paramReleased) {  // Modified condition
-            m_pendingChanges = false;  // Reset the pending changes flag
+        if (m_pendingChanges && m_paramReleased) {
+            m_pendingChanges = false; // Reset the pending changes flag
             return true;
         }
     }

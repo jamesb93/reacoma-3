@@ -44,81 +44,25 @@ void NoveltySlicePlugin::loop() {
     }
 }
 
-void NoveltySlicePlugin::frame() {
-    ImGui::SetNextWindowSize(m_ctx, 400, 210, ImGui::Cond_FirstUseEver);
+// Parameter UI method - only implement the parameter controls
+void NoveltySlicePlugin::drawParameterControls() {
+    // Parameter sliders
+    bool thresholdActive = ImGui::SliderDouble(m_ctx, "Threshold", &m_threshold, 0.0f, 1.0f, "%.2f");
+    m_anyControlActive = ImGui::IsItemActive(m_ctx);
+    
+    bool kernelSizeActive = ImGui::SliderInt(m_ctx, "Kernel Size", &m_kernelSize, 3, 100);
+    m_anyControlActive = m_anyControlActive || ImGui::IsItemActive(m_ctx);
+}
 
-    bool open{true};
-    if (ImGui::Begin(m_ctx, g_name, &open)) {
-        // Check if async processing is complete
-        if (m_isProcessing) {
-            checkProcessingProgress();
-            
-            // Show progress bar
-            ImGui::ProgressBar(m_ctx, m_processingProgress / 100.0);
-            ImGui::Text(m_ctx, m_status);
-            
-            // Add a cancel button
-            if (ImGui::Button(m_ctx, "Cancel Processing")) {
-                // Reset the processing state
-                m_isProcessing = false;
-                strcpy(m_status, "Processing cancelled");
-            }
-        }
-        else {
-            // Draw the processing mode UI elements from the base class
-            drawProcessingModeUI();
-            
-            // Store previous parameter values to detect changes
-            m_prevThreshold = m_threshold;
-            m_prevKernelSize = m_kernelSize;
-            
-            // Track active state before parameters
-            bool wasActive = m_anyControlActive;
-            
-            // Parameter sliders
-            bool thresholdActive = ImGui::SliderDouble(m_ctx, "Threshold", &m_threshold, 0.0f, 1.0f, "%.2f");
-            m_anyControlActive = ImGui::IsItemActive(m_ctx);
-            
-            bool kernelSizeActive = ImGui::SliderInt(m_ctx, "Kernel Size", &m_kernelSize, 3, 100);
-            m_anyControlActive = m_anyControlActive || ImGui::IsItemActive(m_ctx);
-            
-            // Detect parameter changes
-            bool paramsChanged = (m_prevThreshold != m_threshold || m_prevKernelSize != m_kernelSize);
-            
-            // Notify base class of parameter changes
-            if (paramsChanged) {
-                notifyParametersChanged();
-            }
-            
-            // Detect parameter release
-            if (wasActive && !m_anyControlActive) {
-                notifyParameterReleased();
-            }
-            
-            // Check if we should process based on the current state
-            bool shouldProcessNow = shouldProcess();
-            
-            // Show Apply button in manual mode
-            if (!m_previewMode) {
-                if (ImGui::Button(m_ctx, "Apply NoveltySlice")) {
-                    shouldProcessNow = true;
-                }
-            }
-            
-            // Process if needed
-            if (shouldProcessNow) {
-                resetDebounce();
-                strcpy(m_status, "Processing...");
-                applyAlgorithm();
-            }
+// Check if parameters have changed
+bool NoveltySlicePlugin::haveParametersChanged() {
+    return m_threshold != m_prevThreshold || m_kernelSize != m_prevKernelSize;
+}
 
-            ImGui::Text(m_ctx, m_status);
-        }
-        
-        ImGui::End(m_ctx);
-    }
-
-    if (!open) return s_inst.reset();
+// Save current parameter values
+void NoveltySlicePlugin::saveParameterValues() {
+    m_prevThreshold = m_threshold;
+    m_prevKernelSize = m_kernelSize;
 }
 
 bool NoveltySlicePlugin::applyAlgorithm() {
@@ -168,25 +112,29 @@ bool NoveltySlicePlugin::processAudio() {
     if (!take) return false;
     
     PCM_source* source = GetMediaItemTake_Source(take);
-    if (!source) return false;
+    if (!source->IsAvailable()) {
+        return false;
+    } 
     
-    int numChannels = GetMediaSourceNumChannels(source);
-    if (numChannels <= 0) numChannels = 1;
-    
-    double sampleRate = GetMediaSourceSampleRate(source);
+    int numChannels = source->GetNumChannels();
+    double sampleRate = source->GetSampleRate();
     int64_t numSamples = m_audioData.size() / numChannels;
     
-    setupNoveltySliceParameters(numChannels, numSamples, sampleRate);
+    if (numChannels <= 0) {
+        return false;
+    }
+
+    setupNoveltySliceParameters(
+        numChannels, 
+        numSamples, 
+        sampleRate
+    );
     
-    // Reinitialize client with updated parameters
     m_client = NoveltySliceClientType(m_params, m_context);
 
-    // Choose between synchronous and asynchronous processing
     if (m_previewMode && m_immediateMode) {
-        // Only use synchronous processing when both preview AND immediate mode are on
         m_client.setSynchronous(true);
         
-        // Process and wait for completion
         m_client.enqueue(m_params);
         Result result = m_client.process();
         
@@ -195,7 +143,6 @@ bool NoveltySlicePlugin::processAudio() {
             return false;
         }
         
-        // Apply results directly
         if (!createMarkersFromResults()) {
             strcpy(m_status, "Failed to create markers");
             return false;
@@ -205,7 +152,6 @@ bool NoveltySlicePlugin::processAudio() {
     } else {
         m_client.setSynchronous(false);
         
-        // Start the processing asynchronously
         m_client.enqueue(m_params);
         Result result = m_client.process();
         
@@ -214,7 +160,6 @@ bool NoveltySlicePlugin::processAudio() {
             return false;
         }
         
-        // Set state to indicate processing is in progress
         m_isProcessing = true;
         m_processingProgress = 0.0;
         strcpy(m_status, "Processing... 0%");
@@ -230,6 +175,7 @@ bool NoveltySlicePlugin::createMarkersFromResults() {
     MediaItem_Take* take = GetActiveTake(item);
     if (!take) return false;
     
+
     PCM_source* source = GetMediaItemTake_Source(take);
     if (!source) return false;
     

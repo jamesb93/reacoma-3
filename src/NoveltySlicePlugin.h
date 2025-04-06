@@ -1,12 +1,10 @@
 #pragma once
-
 #include "FlucomaPluginBase.h"
 #include <clients/rt/NoveltySliceClient.hpp>
 #include <clients/common/BufferAdaptor.hpp>
 #include <clients/common/MemoryBufferAdaptor.hpp>
 #include <clients/common/ParameterTypes.hpp>
 
-// Using declarations for FluCoMa types
 using namespace fluid::client;
 using namespace noveltyslice;
 using NoveltySliceClientType = NRTThreadingNoveltySliceClient;
@@ -19,11 +17,18 @@ public:
 private:
     static void loop();
     static std::unique_ptr<NoveltySlicePlugin> s_inst;
-
     NoveltySlicePlugin();
     
-    // Implement base class virtual methods
-    void frame() override;
+    // Implement parameter UI drawing from base class
+    void drawParameterControls() override;
+    
+    // Implement parameter change detection
+    bool haveParametersChanged() override;
+    
+    // Implement saving current parameter values
+    void saveParameterValues() override;
+    
+    // Implement remaining base class virtual methods
     bool applyAlgorithm() override;
     bool processAudio() override;
     bool createMarkersFromResults() override;
