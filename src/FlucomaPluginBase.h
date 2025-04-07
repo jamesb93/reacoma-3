@@ -10,112 +10,75 @@
 using namespace fluid::client;
 
 template<typename ClientType, typename PluginType>
-class FluComaPluginBase {
+class FlucomaPluginBase {
 public:
     // Static methods for plugin lifecycle management
     static void start();
     static void loop();
     
-    virtual ~FluComaPluginBase();
+    virtual ~FlucomaPluginBase();
 
 protected:
     // Constructor
-    FluComaPluginBase(const char* pluginName);
+    FlucomaPluginBase(const char* pluginName);
     
-    // Static instance pointer
     static std::unique_ptr<PluginType> s_inst;
 
-    // Main UI frame processing - final implementation in base class
     void frame();
     
-    // Virtual method for derived classes to implement parameter UI
     virtual void drawParameterControls() = 0;
-    
-    // Virtual method to check if parameters have changed from previous values
     virtual bool haveParametersChanged() = 0;
-    
-    // Virtual method to save current parameters as previous values
     virtual void saveParameterValues() = 0;
-    
-    // Common audio data reading functionality
     bool readAudioSamples();
-    
-    // Apply the algorithm - must be implemented by derived classes
     virtual bool applyAlgorithm() = 0;
-    
-    // Process the audio with the current parameters - implemented in base class
     bool processAudio();
-    
-    // Virtual method for setting up algorithm parameters - must be implemented by derived classes
     virtual void setupParameters(int numChannels, int64_t numSamples, double sampleRate) = 0;
-    
-    // Create markers from the processing results - must be implemented by derived classes
     virtual bool createMarkersFromResults() = 0;
-    
-    // Processing mode UI elements - call this from the base class's frame() method
     void drawProcessingModeUI();
-    
-    // Check if processing has completed
     bool checkProcessingProgress();
     
-    // Debounce handling
     bool shouldProcess();
     bool shouldProcessDebounced();
     void resetDebounce();
     void triggerDebounce();
     
-    // Signal that parameters were changed
     void notifyParametersChanged();
-    
-    // Signal that a parameter control was released
     void notifyParameterReleased();
     
-    // UI Context
     ImGui_Context* m_ctx;
-    
-    // Status message
+
     char m_status[255];
     
-    // Plugin name
     const char* m_pluginName;
     
-    // FluCoMa context
     FluidContext m_context;
     
-    // Parameter set and client
     typename ClientType::ParamSetType m_params;
     ClientType m_client;
     
-    // Audio data storage
     std::vector<float> m_audioData;
     
-    // Processing mode flags
-    bool m_previewMode = false; // Automatic vs. manual processing
-    bool m_immediateMode = false; // Parameter change vs. parameter release
+    bool m_previewMode = false;
+    bool m_immediateMode = false;
     
-    // Processing state
     bool m_isProcessing = false;
     double m_processingProgress = 0.0;
     
-    // Parameter state tracking
     bool m_paramsChanged = false;
-    bool m_paramReleased = true; // Track if parameters have been released
+    bool m_paramReleased = true;
     bool m_pendingChanges = false;
     
-    // Debounce variables
     std::chrono::steady_clock::time_point m_lastParamChange;
     double m_debounceTimeMs = 16.0;
     
-    // Flag to indicate if any controls are currently active
     bool m_anyControlActive = false;
 };
 
-// Implementation of template methods
 template<typename ClientType, typename PluginType>
-std::unique_ptr<PluginType> FluComaPluginBase<ClientType, PluginType>::s_inst;
+std::unique_ptr<PluginType> FlucomaPluginBase<ClientType, PluginType>::s_inst;
 
 template<typename ClientType, typename PluginType>
-void FluComaPluginBase<ClientType, PluginType>::start() try {
+void FlucomaPluginBase<ClientType, PluginType>::start() try {
     if (s_inst)
         ImGui::SetNextWindowFocus(s_inst->m_ctx);
     else {
@@ -127,14 +90,14 @@ void FluComaPluginBase<ClientType, PluginType>::start() try {
 }
 
 template<typename ClientType, typename PluginType>
-void FluComaPluginBase<ClientType, PluginType>::loop() {
+void FlucomaPluginBase<ClientType, PluginType>::loop() {
     if (s_inst) {
         s_inst->frame();
     }
 }
 
 template<typename ClientType, typename PluginType>
-FluComaPluginBase<ClientType, PluginType>::FluComaPluginBase(const char* pluginName)
+FlucomaPluginBase<ClientType, PluginType>::FlucomaPluginBase(const char* pluginName)
     : m_ctx{},
       m_pluginName{pluginName},
       m_context{},
@@ -154,72 +117,57 @@ FluComaPluginBase<ClientType, PluginType>::FluComaPluginBase(const char* pluginN
     m_ctx = ImGui::CreateContext(m_pluginName);
     m_lastParamChange = std::chrono::steady_clock::now();
     
-    // Register timer callback for frame updates
     plugin_register("timer", (void *)&loop);
 }
 
 template<typename ClientType, typename PluginType>
-FluComaPluginBase<ClientType, PluginType>::~FluComaPluginBase() {
-    // Unregister timer callback
+FlucomaPluginBase<ClientType, PluginType>::~FlucomaPluginBase() {
     plugin_register("-timer", reinterpret_cast<void *>(&loop));
-    if (m_ctx) {
-        // ImGui::DestroyContext(m_ctx);
-    }
 }
 
 template<typename ClientType, typename PluginType>
-void FluComaPluginBase<ClientType, PluginType>::frame() {
+void FlucomaPluginBase<ClientType, PluginType>::frame() {
     ImGui::SetNextWindowSize(m_ctx, 400, 210, ImGui::Cond_FirstUseEver);
 
     bool open{true};
     if (ImGui::Begin(m_ctx, m_pluginName, &open)) {
-        // Check if async processing is complete
         if (m_isProcessing) {
             checkProcessingProgress();
             
-            // Show progress bar
             ImGui::ProgressBar(m_ctx, m_processingProgress / 100.0);
             ImGui::Text(m_ctx, m_status);
             
-            // Add a cancel button
             if (ImGui::Button(m_ctx, "Cancel Processing")) {
-                // Reset the processing state
+                m_client.cancel();
                 m_isProcessing = false;
                 strcpy(m_status, "Processing cancelled");
             }
         }
         else {
-            // Draw the processing mode UI elements
             drawProcessingModeUI();
             
             bool wasActive = m_anyControlActive;
             m_anyControlActive = false;
             
-            // Draw parameter controls from derived class
             drawParameterControls();
             
-            // Check for parameter changes
             if (haveParametersChanged()) {
                 notifyParametersChanged();
                 saveParameterValues();
             }
             
-            // Notify base class when controls are released
             if (wasActive && !m_anyControlActive) {
                 notifyParameterReleased();
             }
             
-            // Check if we should process based on the current state
             bool shouldProcessNow = shouldProcess();
             
-            // Show Apply button in manual mode
             if (!m_previewMode) {
                 if (ImGui::Button(m_ctx, "Apply")) {
                     shouldProcessNow = true;
                 }
             }
             
-            // Process if needed
             if (shouldProcessNow) {
                 resetDebounce();
                 strcpy(m_status, "Processing...");
@@ -236,7 +184,7 @@ void FluComaPluginBase<ClientType, PluginType>::frame() {
 }
 
 template<typename ClientType, typename PluginType>
-bool FluComaPluginBase<ClientType, PluginType>::readAudioSamples() {
+bool FlucomaPluginBase<ClientType, PluginType>::readAudioSamples() {
     m_audioData.clear();
     MediaItem* item = GetSelectedMediaItem(0, 0);
     if (!item) {
@@ -282,8 +230,8 @@ bool FluComaPluginBase<ClientType, PluginType>::readAudioSamples() {
     }
     
     m_audioData.resize(numChannels * numSamples, 0.0f);
-    const int blockSize = 8192; // Reasonable block size
-    std::vector<double> buffer(blockSize * numChannels); // Temporary buffer for reading
+    const int blockSize = 8192;
+    std::vector<double> buffer(blockSize * numChannels);
     bool hasValidSamples = false;
     
     for (int64_t sampleOffset=0; sampleOffset < numSamples; sampleOffset += blockSize) {
@@ -303,7 +251,7 @@ bool FluComaPluginBase<ClientType, PluginType>::readAudioSamples() {
             buffer.data()
         );
         
-        if (ret == 1) { // Audio data was successfully retrieved
+        if (ret == 1) {
             hasValidSamples = true;
             for (int sampleIdx = 0; sampleIdx < samplesToRead; sampleIdx++) {
                 for (int chanIdx = 0; chanIdx < numChannels; chanIdx++) {
@@ -327,7 +275,7 @@ bool FluComaPluginBase<ClientType, PluginType>::readAudioSamples() {
 }
 
 template<typename ClientType, typename PluginType>
-bool FluComaPluginBase<ClientType, PluginType>::processAudio() {
+bool FlucomaPluginBase<ClientType, PluginType>::processAudio() {
     MediaItem* item = GetSelectedMediaItem(0, 0);
     if (!item) return false;
     
@@ -347,10 +295,8 @@ bool FluComaPluginBase<ClientType, PluginType>::processAudio() {
         return false;
     }
 
-    // Call the virtual method to set up algorithm-specific parameters
     setupParameters(numChannels, numSamples, sampleRate);
     
-    // Create a new client instance with the updated parameters
     m_client = ClientType(m_params, m_context);
 
     if (m_previewMode && m_immediateMode) {
@@ -390,19 +336,15 @@ bool FluComaPluginBase<ClientType, PluginType>::processAudio() {
 }
 
 template<typename ClientType, typename PluginType>
-void FluComaPluginBase<ClientType, PluginType>::drawProcessingModeUI() {
-    // Store previous values to detect changes
+void FlucomaPluginBase<ClientType, PluginType>::drawProcessingModeUI() {
     bool prevPreviewMode = m_previewMode;
     bool prevImmediateMode = m_immediateMode;
     
-    // Mode selection checkboxes
     ImGui::Text(m_ctx, "Processing Mode:");
     ImGui::Checkbox(m_ctx, "Preview Mode (auto-process)", &m_previewMode);
     ImGui::Checkbox(m_ctx, "Immediate Mode (process on change)", &m_immediateMode);
     
-    // Tooltip explanations
     if (ImGui::IsItemHovered(m_ctx)) {
-        // Store the return value to fix the warning
         bool tooltipOpen = ImGui::BeginTooltip(m_ctx);
         if (tooltipOpen) {
             ImGui::Text(m_ctx, "When ON: Process on every parameter change (with debouncing)");
@@ -411,7 +353,6 @@ void FluComaPluginBase<ClientType, PluginType>::drawProcessingModeUI() {
         }
     }
     
-    // Handle mode toggling - only update status message, don't trigger processing
     if (prevPreviewMode != m_previewMode || prevImmediateMode != m_immediateMode) {
         if (m_previewMode) {
             if (m_immediateMode) {
@@ -422,9 +363,7 @@ void FluComaPluginBase<ClientType, PluginType>::drawProcessingModeUI() {
         } else {
             strcpy(m_status, "Manual processing with Apply button");
         }
-        // Reset any pending debounce to prevent immediate processing
         resetDebounce();
-        // Make sure we don't process just because mode changed
         m_paramReleased = true;
     }
     
@@ -432,7 +371,7 @@ void FluComaPluginBase<ClientType, PluginType>::drawProcessingModeUI() {
 }
 
 template<typename ClientType, typename PluginType>
-bool FluComaPluginBase<ClientType, PluginType>::checkProcessingProgress() {
+bool FlucomaPluginBase<ClientType, PluginType>::checkProcessingProgress() {
     if (!m_isProcessing) return false;
     
     Result result;
@@ -448,7 +387,6 @@ bool FluComaPluginBase<ClientType, PluginType>::checkProcessingProgress() {
         }
         
         if (createMarkersFromResults()) {
-            // Success handled by createMarkersFromResults
             return true;
         } else {
             strcpy(m_status, "Failed to create markers");
@@ -460,13 +398,11 @@ bool FluComaPluginBase<ClientType, PluginType>::checkProcessingProgress() {
 }
 
 template<typename ClientType, typename PluginType>
-bool FluComaPluginBase<ClientType, PluginType>::shouldProcessDebounced() {
-    // Check if debounce timer has elapsed
+bool FlucomaPluginBase<ClientType, PluginType>::shouldProcessDebounced() {
     auto currentTime = std::chrono::steady_clock::now();
     auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         currentTime - m_lastParamChange).count();
     
-    // Process if params changed and debounce time elapsed
     if (m_paramsChanged && elapsedMs >= m_debounceTimeMs) {
         m_paramsChanged = false;
         return true;
@@ -476,64 +412,54 @@ bool FluComaPluginBase<ClientType, PluginType>::shouldProcessDebounced() {
 }
 
 template<typename ClientType, typename PluginType>
-void FluComaPluginBase<ClientType, PluginType>::resetDebounce() {
+void FlucomaPluginBase<ClientType, PluginType>::resetDebounce() {
     m_paramsChanged = false;
 }
 
 template<typename ClientType, typename PluginType>
-void FluComaPluginBase<ClientType, PluginType>::triggerDebounce() {
+void FlucomaPluginBase<ClientType, PluginType>::triggerDebounce() {
     m_paramsChanged = true;
     m_lastParamChange = std::chrono::steady_clock::now();
 }
 
 template<typename ClientType, typename PluginType>
-void FluComaPluginBase<ClientType, PluginType>::notifyParametersChanged() {
-    // Called when a parameter value changes
+void FlucomaPluginBase<ClientType, PluginType>::notifyParametersChanged() {
     if (m_previewMode && m_immediateMode) {
-        // In immediate mode with preview, use debouncing
         triggerDebounce();
     }
     
-    // Always mark that parameters have changed and need release
     m_paramReleased = false;
     m_pendingChanges = true;
 }
 
 template<typename ClientType, typename PluginType>
-void FluComaPluginBase<ClientType, PluginType>::notifyParameterReleased() {
-    // Called when a parameter control is released
+void FlucomaPluginBase<ClientType, PluginType>::notifyParameterReleased() {
     m_paramReleased = true;
 }
 
 template<typename ClientType, typename PluginType>
-bool FluComaPluginBase<ClientType, PluginType>::shouldProcess() {
-    // Never process if we're already processing
+bool FlucomaPluginBase<ClientType, PluginType>::shouldProcess() {
     if (m_isProcessing) {
         return false;
     }
     
-    // In immediate mode with preview, check debounce
     if (m_previewMode && m_immediateMode && m_paramsChanged) {
-        // Show countdown
-        auto currentTime = std::chrono::steady_clock::now();
-        auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            currentTime - m_lastParamChange).count();
-        double remainingTime = m_debounceTimeMs - elapsedMs;
-        if (remainingTime < 0) remainingTime = 0;
-        char debounceMsg[64];
-        snprintf(debounceMsg, sizeof(debounceMsg),
-                "Will process in %.1f ms...", remainingTime);
-        ImGui::Text(m_ctx, debounceMsg);
+        // auto currentTime = std::chrono::steady_clock::now();
+        // auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        //     currentTime - m_lastParamChange).count();
+        // double remainingTime = m_debounceTimeMs - elapsedMs;
+        // if (remainingTime < 0) remainingTime = 0;
+        // char debounceMsg[64];
+        // snprintf(debounceMsg, sizeof(debounceMsg),
+        //         "Will process in %.1f ms...", remainingTime);
+        // ImGui::Text(m_ctx, debounceMsg);
         
-        // Check if debounce time elapsed
         return shouldProcessDebounced();
     }
     
-    // In non-immediate mode with preview, check for parameter release
     if (m_previewMode && !m_immediateMode && !m_anyControlActive) {
-        // If parameters were changed and now released
         if (m_pendingChanges && m_paramReleased) {
-            m_pendingChanges = false; // Reset the pending changes flag
+            m_pendingChanges = false;
             return true;
         }
     }

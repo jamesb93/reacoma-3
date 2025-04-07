@@ -1,19 +1,18 @@
 #pragma once
-#include "FlucomaPluginBase.h"
+#include "FlucomaSlicerPluginBase.h"
 #include <clients/rt/NoveltySliceClient.hpp>
 #include <clients/common/BufferAdaptor.hpp>
 #include <clients/common/MemoryBufferAdaptor.hpp>
 #include <clients/common/ParameterTypes.hpp>
 #include "VectorBufferAdaptor.h"
 
-// Using declarations for FluCoMa types
+// Using declarations for Flucoma types
 using namespace fluid::client;
 using namespace noveltyslice;
 using NoveltySliceClientType = NRTThreadingNoveltySliceClient;
 
-class NoveltySlicePlugin : public FluComaPluginBase<NoveltySliceClientType, NoveltySlicePlugin> {
+class NoveltySlicePlugin : public FlucomaSlicerPluginBase<NoveltySliceClientType, NoveltySlicePlugin> {
 public:
-    // Constructor is now public since it's called by the base class's start() method
     NoveltySlicePlugin();
     ~NoveltySlicePlugin();
 
@@ -33,8 +32,13 @@ private:
     // Setup parameters specifically for NoveltySlice algorithm
     void setupParameters(int numChannels, int64_t numSamples, double sampleRate) override;
     
-    // Create markers from results
-    bool createMarkersFromResults() override;
+    // Override getSliceBuffer to return the correct buffer
+    fluid::client::BufferAdaptor* getSliceBuffer() override;
+    
+    // Override the undo label
+    const char* getUndoLabel() const override {
+        return "Flucoma: Add NoveltySlice Markers";
+    }
     
     // NoveltySlice specific parameters
     double m_threshold;
