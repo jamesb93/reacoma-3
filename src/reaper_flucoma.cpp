@@ -3,7 +3,8 @@
 
 #define REAPERAPI_IMPLEMENT
 #include "reaper_plugin_functions.h"
-#include "NoveltySlicePlugin.h"
+
+#include "NoveltySlicePlugin.cpp"
 
 static int g_actionId;
 

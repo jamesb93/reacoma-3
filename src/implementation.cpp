@@ -5,10 +5,8 @@
 #include "reaper_imgui_functions.h"
 
 // Main functionality
-#include "reaper_noveltyslice.cpp"
+#include "reaper_flucoma.cpp"
 
-// NoveltySlicePlugin implementation
 #include "NoveltySlicePlugin.cpp"
 
-// VectorBufferAdaptor implementation  
 #include "VectorBufferAdaptor.cpp"

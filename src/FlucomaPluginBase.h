@@ -1,6 +1,7 @@
 #pragma once
 #include "reaper_imgui_functions.h"
 #include "reaper_plugin_functions.h"
+#include "ParameterManager.h" // Include our new parameter management system
 #include <clients/common/FluidContext.hpp>
 #include <clients/common/FluidBaseClient.hpp>
 #include <clients/common/ParameterSet.hpp>
@@ -8,32 +9,74 @@
 #include <vector>
 #include <chrono>
 using namespace fluid::client;
+using namespace flucoma; // Using our parameter namespace
 
-template<typename ClientType, typename PluginType>
+struct SlicerTag {};
+struct AudioTag {};
+
+template<typename ClientType, typename PluginType, typename CategoryTag>
 class FlucomaPluginBase {
 public:
-    // Static methods for plugin lifecycle management
     static void start();
     static void loop();
     
     virtual ~FlucomaPluginBase();
 
 protected:
-    // Constructor
     FlucomaPluginBase(const char* pluginName);
     
     static std::unique_ptr<PluginType> s_inst;
 
     void frame();
     
-    virtual void drawParameterControls() = 0;
-    virtual bool haveParametersChanged() = 0;
-    virtual void saveParameterValues() = 0;
-    bool readAudioSamples();
+    // Since parameters are now initialized in the constructor, this is now optional
+    virtual void initParameters() {}
+    
+    virtual void setupParameterControls() {}; // Optional method to setup additional GUI elements
     virtual bool applyAlgorithm() = 0;
+    
+    bool readAudioSamples();
+    
+    // Process implementation that varies by category tag
+    bool process() {
+        return processImpl(CategoryTag{});
+    }
+    
+    bool processImpl(SlicerTag) {
+        m_audioData.clear();
+        
+        if (!readAudioSamples()) {
+            strcpy(m_status, "Audio data reading failed");
+            return false;
+        }
+        
+        return processAudio();
+    }
+    
+    bool processImpl(AudioTag) {
+        return false;
+    }
+    
     bool processAudio();
     virtual void setupParameters(int numChannels, int64_t numSamples, double sampleRate) = 0;
-    virtual bool createMarkersFromResults() = 0;
+    
+    // Output buffer accessor that varies by category tag
+    fluid::client::BufferAdaptor* getOutputBuffer() { 
+        return getOutputBufferImpl(CategoryTag{});
+    }
+    
+    fluid::client::BufferAdaptor* getOutputBufferImpl(SlicerTag) {
+        return m_params.template get<5>().get();
+    }
+    
+    fluid::client::BufferAdaptor* getOutputBufferImpl(AudioTag) {
+        return m_params.template get<5>().get();
+    }
+    
+    const char* getUndoLabel() const {
+        return "";
+    }
+    
     void drawProcessingModeUI();
     bool checkProcessingProgress();
     
@@ -44,6 +87,12 @@ protected:
     
     void notifyParametersChanged();
     void notifyParameterReleased();
+
+    bool handleResults() {
+        return handleResultsImpl(CategoryTag{});
+    }
+    bool handleResultsImpl(SlicerTag);
+    bool handleResultsImpl(AudioTag);
     
     ImGui_Context* m_ctx;
 
@@ -71,14 +120,19 @@ protected:
     std::chrono::steady_clock::time_point m_lastParamChange;
     double m_debounceTimeMs = 16.0;
     
-    bool m_anyControlActive = false;
+    // Parameter management
+    ParameterManager m_parameterManager;
 };
 
-template<typename ClientType, typename PluginType>
-std::unique_ptr<PluginType> FlucomaPluginBase<ClientType, PluginType>::s_inst;
+//
+// Implementation for template methods
+//
 
-template<typename ClientType, typename PluginType>
-void FlucomaPluginBase<ClientType, PluginType>::start() try {
+template<typename ClientType, typename PluginType, typename CategoryTag>
+std::unique_ptr<PluginType> FlucomaPluginBase<ClientType, PluginType, CategoryTag>::s_inst;
+
+template<typename ClientType, typename PluginType, typename CategoryTag>
+void FlucomaPluginBase<ClientType, PluginType, CategoryTag>::start() try {
     if (s_inst)
         ImGui::SetNextWindowFocus(s_inst->m_ctx);
     else {
@@ -89,15 +143,15 @@ void FlucomaPluginBase<ClientType, PluginType>::start() try {
     s_inst.reset();
 }
 
-template<typename ClientType, typename PluginType>
-void FlucomaPluginBase<ClientType, PluginType>::loop() {
+template<typename ClientType, typename PluginType, typename CategoryTag>
+void FlucomaPluginBase<ClientType, PluginType, CategoryTag>::loop() {
     if (s_inst) {
         s_inst->frame();
     }
 }
 
-template<typename ClientType, typename PluginType>
-FlucomaPluginBase<ClientType, PluginType>::FlucomaPluginBase(const char* pluginName)
+template<typename ClientType, typename PluginType, typename CategoryTag>
+FlucomaPluginBase<ClientType, PluginType, CategoryTag>::FlucomaPluginBase(const char* pluginName)
     : m_ctx{},
       m_pluginName{pluginName},
       m_context{},
@@ -109,8 +163,7 @@ FlucomaPluginBase<ClientType, PluginType>::FlucomaPluginBase(const char* pluginN
       m_immediateMode{false},
       m_paramsChanged{false},
       m_paramReleased{true},
-      m_debounceTimeMs{16.0},
-      m_anyControlActive{false}
+      m_debounceTimeMs{16.0}
 {
     strcpy(m_status, "Ready");
     ImGui::init(plugin_getapi);
@@ -118,73 +171,83 @@ FlucomaPluginBase<ClientType, PluginType>::FlucomaPluginBase(const char* pluginN
     m_lastParamChange = std::chrono::steady_clock::now();
     
     plugin_register("timer", (void *)&loop);
+    
+    // Call initParameters as a hook for derived classes that don't initialize parameters in constructor
+    initParameters();
 }
 
-template<typename ClientType, typename PluginType>
-FlucomaPluginBase<ClientType, PluginType>::~FlucomaPluginBase() {
+template<typename ClientType, typename PluginType, typename CategoryTag>
+FlucomaPluginBase<ClientType, PluginType, CategoryTag>::~FlucomaPluginBase() {
     plugin_register("-timer", reinterpret_cast<void *>(&loop));
 }
 
-template<typename ClientType, typename PluginType>
-void FlucomaPluginBase<ClientType, PluginType>::frame() {
+template<typename ClientType, typename PluginType, typename CategoryTag>
+void FlucomaPluginBase<ClientType, PluginType, CategoryTag>::frame() {
     ImGui::SetNextWindowSize(m_ctx, 400, 210, ImGui::Cond_FirstUseEver);
-
+    
     bool open{true};
     if (ImGui::Begin(m_ctx, m_pluginName, &open)) {
         if (m_isProcessing) {
             checkProcessingProgress();
-            
-            ImGui::ProgressBar(m_ctx, m_processingProgress / 100.0);
-            ImGui::Text(m_ctx, m_status);
-            
-            if (ImGui::Button(m_ctx, "Cancel Processing")) {
-                m_client.cancel();
-                m_isProcessing = false;
-                strcpy(m_status, "Processing cancelled");
-            }
         }
-        else {
-            drawProcessingModeUI();
-            
-            bool wasActive = m_anyControlActive;
-            m_anyControlActive = false;
-            
-            drawParameterControls();
-            
-            if (haveParametersChanged()) {
-                notifyParametersChanged();
-                saveParameterValues();
+        
+        ImGui::BeginDisabled(m_ctx, m_isProcessing);
+        
+        drawProcessingModeUI();
+        
+        // Draw parameters and track if any are active
+        setupParameterControls(); // Any custom setup before drawing parameters
+        
+        bool paramsChanged = m_parameterManager.drawAll(m_ctx);
+        
+        if (paramsChanged || m_parameterManager.anyParameterChanged()) {
+            notifyParametersChanged();
+            m_parameterManager.saveAllValues();
+        }
+        
+        bool wasActive = m_parameterManager.isAnyControlActive();
+        if (!wasActive && m_parameterManager.isAnyControlActive()) {
+            notifyParameterReleased();
+        }
+        
+        ImGui::ProgressBar(m_ctx, m_isProcessing ? m_processingProgress / 100.0 : 0.0);
+        
+        bool shouldProcessNow = shouldProcess();
+        
+        if (!m_previewMode) {
+            if (ImGui::Button(m_ctx, "Apply")) {
+                shouldProcessNow = true;
             }
             
-            if (wasActive && !m_anyControlActive) {
-                notifyParameterReleased();
-            }
-            
-            bool shouldProcessNow = shouldProcess();
-            
-            if (!m_previewMode) {
-                if (ImGui::Button(m_ctx, "Apply")) {
-                    shouldProcessNow = true;
-                }
-            }
-            
-            if (shouldProcessNow) {
-                resetDebounce();
-                strcpy(m_status, "Processing...");
-                applyAlgorithm();
-            }
-
-            ImGui::Text(m_ctx, m_status);
+            ImGui::SameLine(m_ctx);
+        }
+        
+        ImGui::EndDisabled(m_ctx);
+        
+        ImGui::BeginDisabled(m_ctx, !m_isProcessing);
+        if (ImGui::Button(m_ctx, "Cancel Processing")) {
+            m_client.cancel();
+            m_isProcessing = false;
+            strcpy(m_status, "Processing cancelled");
+        }
+        ImGui::EndDisabled(m_ctx);
+        
+        ImGui::Text(m_ctx, m_status);
+        
+        if (shouldProcessNow && !m_isProcessing) {
+            resetDebounce();
+            strcpy(m_status, "Processing...");
+            applyAlgorithm();
         }
         
         ImGui::End(m_ctx);
     }
-
+    
     if (!open) return s_inst.reset();
 }
 
-template<typename ClientType, typename PluginType>
-bool FlucomaPluginBase<ClientType, PluginType>::readAudioSamples() {
+template<typename ClientType, typename PluginType, typename CategoryTag>
+bool FlucomaPluginBase<ClientType, PluginType, CategoryTag>::readAudioSamples() {
     m_audioData.clear();
     MediaItem* item = GetSelectedMediaItem(0, 0);
     if (!item) {
@@ -274,8 +337,8 @@ bool FlucomaPluginBase<ClientType, PluginType>::readAudioSamples() {
     return true;
 }
 
-template<typename ClientType, typename PluginType>
-bool FlucomaPluginBase<ClientType, PluginType>::processAudio() {
+template<typename ClientType, typename PluginType, typename CategoryTag>
+bool FlucomaPluginBase<ClientType, PluginType, CategoryTag>::processAudio() {
     MediaItem* item = GetSelectedMediaItem(0, 0);
     if (!item) return false;
     
@@ -310,8 +373,8 @@ bool FlucomaPluginBase<ClientType, PluginType>::processAudio() {
             return false;
         }
         
-        if (!createMarkersFromResults()) {
-            strcpy(m_status, "Failed to create markers");
+        if (!handleResults()) {
+            strcpy(m_status, "Failed to handle results");
             return false;
         }
         
@@ -335,8 +398,8 @@ bool FlucomaPluginBase<ClientType, PluginType>::processAudio() {
     }
 }
 
-template<typename ClientType, typename PluginType>
-void FlucomaPluginBase<ClientType, PluginType>::drawProcessingModeUI() {
+template<typename ClientType, typename PluginType, typename CategoryTag>
+void FlucomaPluginBase<ClientType, PluginType, CategoryTag>::drawProcessingModeUI() {
     bool prevPreviewMode = m_previewMode;
     bool prevImmediateMode = m_immediateMode;
     
@@ -370,8 +433,8 @@ void FlucomaPluginBase<ClientType, PluginType>::drawProcessingModeUI() {
     ImGui::Separator(m_ctx);
 }
 
-template<typename ClientType, typename PluginType>
-bool FlucomaPluginBase<ClientType, PluginType>::checkProcessingProgress() {
+template<typename ClientType, typename PluginType, typename CategoryTag>
+bool FlucomaPluginBase<ClientType, PluginType, CategoryTag>::checkProcessingProgress() {
     if (!m_isProcessing) return false;
     
     Result result;
@@ -386,7 +449,7 @@ bool FlucomaPluginBase<ClientType, PluginType>::checkProcessingProgress() {
             return false;
         }
         
-        if (createMarkersFromResults()) {
+        if (handleResults()) {
             return true;
         } else {
             strcpy(m_status, "Failed to create markers");
@@ -397,8 +460,8 @@ bool FlucomaPluginBase<ClientType, PluginType>::checkProcessingProgress() {
     return false; // Still processing
 }
 
-template<typename ClientType, typename PluginType>
-bool FlucomaPluginBase<ClientType, PluginType>::shouldProcessDebounced() {
+template<typename ClientType, typename PluginType, typename CategoryTag>
+bool FlucomaPluginBase<ClientType, PluginType, CategoryTag>::shouldProcessDebounced() {
     auto currentTime = std::chrono::steady_clock::now();
     auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         currentTime - m_lastParamChange).count();
@@ -411,19 +474,19 @@ bool FlucomaPluginBase<ClientType, PluginType>::shouldProcessDebounced() {
     return false;
 }
 
-template<typename ClientType, typename PluginType>
-void FlucomaPluginBase<ClientType, PluginType>::resetDebounce() {
+template<typename ClientType, typename PluginType, typename CategoryTag>
+void FlucomaPluginBase<ClientType, PluginType, CategoryTag>::resetDebounce() {
     m_paramsChanged = false;
 }
 
-template<typename ClientType, typename PluginType>
-void FlucomaPluginBase<ClientType, PluginType>::triggerDebounce() {
+template<typename ClientType, typename PluginType, typename CategoryTag>
+void FlucomaPluginBase<ClientType, PluginType, CategoryTag>::triggerDebounce() {
     m_paramsChanged = true;
     m_lastParamChange = std::chrono::steady_clock::now();
 }
 
-template<typename ClientType, typename PluginType>
-void FlucomaPluginBase<ClientType, PluginType>::notifyParametersChanged() {
+template<typename ClientType, typename PluginType, typename CategoryTag>
+void FlucomaPluginBase<ClientType, PluginType, CategoryTag>::notifyParametersChanged() {
     if (m_previewMode && m_immediateMode) {
         triggerDebounce();
     }
@@ -432,32 +495,22 @@ void FlucomaPluginBase<ClientType, PluginType>::notifyParametersChanged() {
     m_pendingChanges = true;
 }
 
-template<typename ClientType, typename PluginType>
-void FlucomaPluginBase<ClientType, PluginType>::notifyParameterReleased() {
+template<typename ClientType, typename PluginType, typename CategoryTag>
+void FlucomaPluginBase<ClientType, PluginType, CategoryTag>::notifyParameterReleased() {
     m_paramReleased = true;
 }
 
-template<typename ClientType, typename PluginType>
-bool FlucomaPluginBase<ClientType, PluginType>::shouldProcess() {
+template<typename ClientType, typename PluginType, typename CategoryTag>
+bool FlucomaPluginBase<ClientType, PluginType, CategoryTag>::shouldProcess() {
     if (m_isProcessing) {
         return false;
     }
     
     if (m_previewMode && m_immediateMode && m_paramsChanged) {
-        // auto currentTime = std::chrono::steady_clock::now();
-        // auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-        //     currentTime - m_lastParamChange).count();
-        // double remainingTime = m_debounceTimeMs - elapsedMs;
-        // if (remainingTime < 0) remainingTime = 0;
-        // char debounceMsg[64];
-        // snprintf(debounceMsg, sizeof(debounceMsg),
-        //         "Will process in %.1f ms...", remainingTime);
-        // ImGui::Text(m_ctx, debounceMsg);
-        
         return shouldProcessDebounced();
     }
     
-    if (m_previewMode && !m_immediateMode && !m_anyControlActive) {
+    if (m_previewMode && !m_immediateMode && !m_parameterManager.isAnyControlActive()) {
         if (m_pendingChanges && m_paramReleased) {
             m_pendingChanges = false;
             return true;
@@ -465,4 +518,74 @@ bool FlucomaPluginBase<ClientType, PluginType>::shouldProcess() {
     }
     
     return false;
+}
+
+template<typename ClientType, typename PluginType, typename CategoryTag>
+bool FlucomaPluginBase<ClientType, PluginType, CategoryTag>::handleResultsImpl(SlicerTag) {
+    MediaItem* item = GetSelectedMediaItem(0, 0);
+    if (!item) return false;
+    
+    MediaItem_Take* take = GetActiveTake(item);
+    if (!take) return false;
+    
+    PCM_source* source = GetMediaItemTake_Source(take);
+    if (!source) return false;
+    
+    fluid::client::BufferAdaptor* outputBuffer = getOutputBuffer();
+    if (!outputBuffer) {
+        strcpy(m_status, "Invalid output buffer");
+        return false;
+    }
+    
+    fluid::client::BufferAdaptor::ReadAccess readAccess(outputBuffer);
+    if (!readAccess.valid()) {
+        strcpy(m_status, "Invalid output buffer access");
+        return false;
+    }
+    
+    auto markerView = readAccess.samps(0);    
+    double sampleRate = GetMediaSourceSampleRate(source);
+    double playRate = GetMediaItemTakeInfo_Value(take, "D_PLAYRATE");
+    
+    Undo_BeginBlock2(0);
+    
+    int markerCount = GetNumTakeMarkers(take);
+    for (int i = markerCount - 1; i >= 0; i--) {
+        DeleteTakeMarker(take, i);
+    }
+    
+    int numMarkers = 0;
+    const char* markerLabel = "";
+    
+    for (fluid::index i = 0; i < markerView.size(); i++) {
+        if (markerView(i) > 0) {
+            double markerTime = markerView(i) / sampleRate / playRate;
+            SetTakeMarker(take, -1, markerLabel, &markerTime, nullptr);
+            numMarkers++;
+        }
+    }
+    
+    UpdateTimeline();
+    Undo_EndBlock2(0, getUndoLabel(), -1);
+    
+    // Success
+    char successMsg[256];
+    snprintf(successMsg, sizeof(successMsg), 
+             "%s: Added %d %s markers", m_pluginName, numMarkers, markerLabel);
+    strcpy(m_status, successMsg);
+    
+    return true;
+}
+
+template<typename ClientType, typename PluginType, typename CategoryTag>
+bool FlucomaPluginBase<ClientType, PluginType, CategoryTag>::handleResultsImpl(AudioTag) {
+    // Audio processing result handler would go here
+    // This might involve creating a new take, new media item, or modifying audio buffers
+    
+    MediaItem* item = GetSelectedMediaItem(0, 0);
+    if (!item) return false;
+    
+    // Example implementation for audio processors (placeholder)
+    strcpy(m_status, "Audio processing complete");
+    return true;
 }
