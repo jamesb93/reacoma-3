@@ -66,15 +66,9 @@ public:
     
     ~NoveltySlicePlugin() {}
 
-private:
-    // Since parameters are now initialized in the constructor, this method should be empty
-    void initParameters() override {
-        // Parameters are already initialized in the constructor
-    }
-    
+private:    
     // Optional: override to add any custom controls
     void setupParameterControls() override {
-        // Add any additional ImGui controls here that aren't handled by the parameter manager
         ImGui::Separator(m_ctx);
         ImGui::Text(m_ctx, "Algorithm Settings");
     }
@@ -83,7 +77,6 @@ private:
         return process();
     }
     
-    // Setup parameters specifically for NoveltySlice algorithm
     void setupParameters(int numChannels, int64_t numSamples, double sampleRate) override {
         auto inputBuffer = InputBufferT::type(
             new fluid::VectorBufferAdaptor(m_audioData, numChannels, numSamples, sampleRate)

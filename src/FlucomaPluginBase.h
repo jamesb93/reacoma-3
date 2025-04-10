@@ -28,10 +28,6 @@ protected:
     static std::unique_ptr<PluginType> s_inst;
 
     void frame();
-    
-    // Since parameters are now initialized in the constructor, this is now optional
-    virtual void initParameters() {}
-    
     virtual void setupParameterControls() {}; // Optional method to setup additional GUI elements
     virtual bool applyAlgorithm() = 0;
     
@@ -171,9 +167,6 @@ FlucomaPluginBase<ClientType, PluginType, CategoryTag>::FlucomaPluginBase(const 
     m_lastParamChange = std::chrono::steady_clock::now();
     
     plugin_register("timer", (void *)&loop);
-    
-    // Call initParameters as a hook for derived classes that don't initialize parameters in constructor
-    initParameters();
 }
 
 template<typename ClientType, typename PluginType, typename CategoryTag>
@@ -198,15 +191,23 @@ void FlucomaPluginBase<ClientType, PluginType, CategoryTag>::frame() {
         // Draw parameters and track if any are active
         setupParameterControls(); // Any custom setup before drawing parameters
         
+        // Remember the active state before drawing
+        bool wasActive = m_parameterManager.isAnyControlActive();
+        
+        // Draw parameters
         bool paramsChanged = m_parameterManager.drawAll(m_ctx);
         
+        // Check current active state
+        bool isActive = m_parameterManager.isAnyControlActive();
+        
+        // Handle parameter changes
         if (paramsChanged || m_parameterManager.anyParameterChanged()) {
             notifyParametersChanged();
             m_parameterManager.saveAllValues();
         }
         
-        bool wasActive = m_parameterManager.isAnyControlActive();
-        if (!wasActive && m_parameterManager.isAnyControlActive()) {
+        // Check for parameter release (was active but now isn't)
+        if (wasActive && !isActive) {
             notifyParameterReleased();
         }
         
@@ -498,7 +499,12 @@ void FlucomaPluginBase<ClientType, PluginType, CategoryTag>::notifyParametersCha
 template<typename ClientType, typename PluginType, typename CategoryTag>
 void FlucomaPluginBase<ClientType, PluginType, CategoryTag>::notifyParameterReleased() {
     m_paramReleased = true;
+    
+    if (m_previewMode && !m_immediateMode && m_pendingChanges) {
+        strcpy(m_status, "Parameter released - preparing to process");
+    }
 }
+
 
 template<typename ClientType, typename PluginType, typename CategoryTag>
 bool FlucomaPluginBase<ClientType, PluginType, CategoryTag>::shouldProcess() {
@@ -510,7 +516,7 @@ bool FlucomaPluginBase<ClientType, PluginType, CategoryTag>::shouldProcess() {
         return shouldProcessDebounced();
     }
     
-    if (m_previewMode && !m_immediateMode && !m_parameterManager.isAnyControlActive()) {
+    if (m_previewMode && !m_immediateMode) {
         if (m_pendingChanges && m_paramReleased) {
             m_pendingChanges = false;
             return true;
