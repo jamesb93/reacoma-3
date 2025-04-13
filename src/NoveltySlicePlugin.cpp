@@ -10,10 +10,9 @@
 #include <algorithm>
 #include <cmath>
 
-// Using declarations for Flucoma types
 using namespace fluid::client;
 using namespace noveltyslice;
-using namespace flucoma;  // For parameter management
+using namespace flucoma;
 using NoveltySliceClientType = NRTThreadingNoveltySliceClient;
 
 class NoveltySlicePlugin : public FlucomaPluginBase<NoveltySliceClientType, NoveltySlicePlugin, SlicerTag> {
@@ -67,7 +66,6 @@ public:
     ~NoveltySlicePlugin() {}
 
 private:    
-    // Optional: override to add any custom controls
     void setupParameterControls() override {
         ImGui::Separator(m_ctx);
         ImGui::Text(m_ctx, "Algorithm Settings");
@@ -102,7 +100,6 @@ private:
         m_params.template set<11>(fluid::client::FFTParams(1024, -1, -1), nullptr); // hopSize
     }
     
-    // Member references to parameters
     ParameterWrapper<double>& m_threshold;
     ParameterWrapper<int>& m_kernelSize;
     ParameterWrapper<int>& m_filterSize;

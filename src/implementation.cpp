@@ -8,5 +8,6 @@
 #include "reaper_flucoma.cpp"
 
 #include "NoveltySlicePlugin.cpp"
+#include "HPSSPlugin.cpp"
 
 #include "VectorBufferAdaptor.cpp"
